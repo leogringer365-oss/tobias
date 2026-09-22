@@ -1,4 +1,4 @@
--- Tobias Hub v2.4 BLACKBOX DEBUG
+-- Tobias Hub v2.5 BLACKBOX DEBUG
 -- Menu: RightShift | Configs salvas quando o executor suporta writefile/readfile
 
 getgenv().Configs = getgenv().Configs or {}
@@ -398,13 +398,59 @@ local function TeleportServer(cursor)
 end
 
 local IsTweening = false
+local ActiveTween = nil
+local ActiveTweenTarget = nil
+local ActiveTweenSpeed = nil
+local ActiveTweenGeneration = 0
+
+local function SameTweenTarget(a, b)
+    if not a or not b then return false end
+    return (a.Position - b.Position).Magnitude <= 1
+end
+
+local function CancelActiveTween(reason)
+    if ActiveTween and ActiveTween.PlaybackState == Enum.PlaybackState.Playing then
+        DebugAction("TWEEN_CANCEL", tostring(reason or "movement changed"), 0.10)
+        pcall(function() ActiveTween:Cancel() end)
+    end
+    ActiveTween = nil
+    ActiveTweenTarget = nil
+    ActiveTweenSpeed = nil
+    ActiveTweenGeneration += 1
+    IsTweening = false
+end
+
 local function Tween(target, speed)
     local __dbgStart = DebugFunction("Tween",DebugSerialize(target))
-    DebugSetState("TWEENING")
-    DebugState.LastTween = DebugSerialize(target)
     speed = math.max(tonumber(Configs.TweenSpeed) or tonumber(speed) or 350, 1)
     local hrp = GetHRP()
-    if not hrp or not target then return nil end
+    if not hrp or not target then
+        DebugAction("TWEEN_ABORT", "hrp=" .. tostring(hrp ~= nil) .. " target=" .. tostring(target ~= nil), 0.30)
+        return nil
+    end
+
+    -- IMPORTANT: the main farm loop runs many times per second. Reusing the
+    -- same tween prevents TweenService from cancelling the previous tween on
+    -- every cycle when the destination has not changed.
+    if ActiveTween
+        and ActiveTween.PlaybackState == Enum.PlaybackState.Playing
+        and SameTweenTarget(ActiveTweenTarget, target)
+        and math.abs((ActiveTweenSpeed or speed) - speed) < 0.01 then
+        IsTweening = true
+        DebugSetState("TWEENING")
+        DebugState.LastTween = DebugSerialize(target)
+        DebugState.LastTweenDistance = (hrp.Position - target.Position).Magnitude
+        DebugAction("TWEEN_REUSE", string.format("dist=%.1f target=%s", DebugState.LastTweenDistance, DebugSerialize(target)), 0.50)
+        return ActiveTween
+    end
+
+    if ActiveTween and ActiveTween.PlaybackState == Enum.PlaybackState.Playing then
+        DebugAction("TWEEN_REPLACE", "old=" .. DebugSerialize(ActiveTweenTarget) .. " new=" .. DebugSerialize(target), 0.10)
+        pcall(function() ActiveTween:Cancel() end)
+    end
+
+    DebugSetState("TWEENING")
+    DebugState.LastTween = DebugSerialize(target)
 
     local closestEntrance
     local minEntranceDist = math.huge
@@ -440,18 +486,31 @@ local function Tween(target, speed)
     local distance = (hrp.Position - target.Position).Magnitude
     DebugState.LastTweenDistance = distance
     DebugState.MovementActions += 1
-    DebugAction("TWEEN_START", string.format("dist=%.1f speed=%.1f target=%s", distance, speed, DebugSerialize(target)), 0.10)
+    DebugAction("TWEEN_START", string.format("dist=%.1f speed=%.1f target=%s", distance, speed, DebugSerialize(target)))
+
     local tween = TweenService:Create(
         hrp,
         TweenInfo.new(distance / speed, Enum.EasingStyle.Linear),
         {CFrame = target}
     )
 
+    ActiveTweenGeneration += 1
+    local myGeneration = ActiveTweenGeneration
+    ActiveTween = tween
+    ActiveTweenTarget = target
+    ActiveTweenSpeed = speed
     IsTweening = true
     tween:Play()
+
     task.spawn(function()
         local playback = tween.Completed:Wait()
-        IsTweening = false
+        -- An old/cancelled tween must not clear the state of a newer tween.
+        if ActiveTween == tween and ActiveTweenGeneration == myGeneration then
+            ActiveTween = nil
+            ActiveTweenTarget = nil
+            ActiveTweenSpeed = nil
+            IsTweening = false
+        end
         DebugAction("TWEEN_END", "state=" .. tostring(playback) .. " target=" .. DebugSerialize(target))
     end)
 
@@ -2064,9 +2123,8 @@ local function MoveToCombatTarget(myHRP, targetHRP, currentTween)
 
     if shouldTeleport then
         if currentTween then
-            pcall(function() currentTween:Cancel() end)
+            CancelActiveTween("combat teleport requested")
             currentTween = nil
-            DebugAction("TWEEN_CANCEL", "combat teleport requested")
         end
         DebugSetState("COMBAT_TELEPORT")
         DebugState.MovementActions += 1
@@ -2220,8 +2278,8 @@ local function SmartMoveAndAttack(mainMob, QuestTitle, Quest, IsCheckQuest, Cust
     until humanoid.Health <= 0
 
     if tween then
-        tween:Cancel()
-        DebugAction("TWEEN_CANCEL", "combat ended")
+        CancelActiveTween("combat ended")
+        tween = nil
     end
     if hpConn then hpConn:Disconnect() end
     DebugState.CombatExits += 1
@@ -2467,15 +2525,15 @@ local function KaitunWorld1(Quest,QuestTitle,Level)
             return
         end
 		local distanceToQuest = (CFrameQ.Position - hrp.Position).Magnitude
+        DebugAction("QUEST_MOVE_PROGRESS", string.format("quest=%s remaining=%.1f", tostring(NameQuest), distanceToQuest), 0.50)
 		if distanceToQuest > 150 then
 			DebugSetState("MOVING_TO_QUEST")
             DebugAction("MOVE_TO_QUEST", string.format("quest=%s dist=%.1f target=%s", tostring(NameQuest), distanceToQuest, DebugSerialize(CFrameQ)), 0.40)
 			t2 = Tween(CFrameQ, tonumber(Configs.TweenSpeed) or 350)
 		else
 			if t2 then
-				t2:Cancel()
+                CancelActiveTween("arrived at quest NPC")
 				t2 = nil
-                DebugAction("TWEEN_CANCEL", "arrived at quest NPC")
 			end
             DebugAction("QUEST_NPC_SNAP", "from=" .. DebugSerialize(hrp.Position) .. " to=" .. DebugSerialize(CFrameQ.Position))
 			hrp.CFrame = CFrameQ
@@ -2511,13 +2569,14 @@ local function KaitunWorld1(Quest,QuestTitle,Level)
                 return
             end
             local spawnDist = (CFrameMon.Position - playerHrp.Position).Magnitude
+            DebugAction("MOB_MOVE_PROGRESS", string.format("mob=%s remaining=%.1f", tostring(Monster), spawnDist), 0.50)
 			if spawnDist > 150 then
                 DebugAction("MOVE_TO_MOB_SPAWN", string.format("mob=%s dist=%.1f", tostring(Monster), spawnDist), 0.40)
 				t0 = Tween(CFrameMon,350)
 			else
 				if t0 then
-					t0:Cancel()
-                    DebugAction("TWEEN_CANCEL", "arrived at mob spawn")
+                    CancelActiveTween("arrived at mob spawn")
+                    t0 = nil
 				end
                 DebugAction("MOB_SPAWN_SNAP", "to=" .. DebugSerialize(CFrameMon.Position), 0.50)
 				playerHrp.CFrame = CFrameMon
@@ -2640,15 +2699,15 @@ local function KaitunWorld2(Quest,QuestTitle,Level)
             return
         end
 		local distanceToQuest = (CFrameQ.Position - hrp.Position).Magnitude
+        DebugAction("QUEST_MOVE_PROGRESS", string.format("quest=%s remaining=%.1f", tostring(NameQuest), distanceToQuest), 0.50)
 		if distanceToQuest > 150 then
 			DebugSetState("MOVING_TO_QUEST")
             DebugAction("MOVE_TO_QUEST", string.format("quest=%s dist=%.1f target=%s", tostring(NameQuest), distanceToQuest, DebugSerialize(CFrameQ)), 0.40)
 			t2 = Tween(CFrameQ, tonumber(Configs.TweenSpeed) or 350)
 		else
 			if t2 then
-				t2:Cancel()
+                CancelActiveTween("arrived at quest NPC")
 				t2 = nil
-                DebugAction("TWEEN_CANCEL", "arrived at quest NPC")
 			end
             DebugAction("QUEST_NPC_SNAP", "from=" .. DebugSerialize(hrp.Position) .. " to=" .. DebugSerialize(CFrameQ.Position))
 			hrp.CFrame = CFrameQ
@@ -2684,13 +2743,14 @@ local function KaitunWorld2(Quest,QuestTitle,Level)
                 return
             end
             local spawnDist = (CFrameMon.Position - playerHrp.Position).Magnitude
+            DebugAction("MOB_MOVE_PROGRESS", string.format("mob=%s remaining=%.1f", tostring(Monster), spawnDist), 0.50)
 			if spawnDist > 150 then
                 DebugAction("MOVE_TO_MOB_SPAWN", string.format("mob=%s dist=%.1f", tostring(Monster), spawnDist), 0.40)
 				t0 = Tween(CFrameMon,350)
 			else
 				if t0 then
-					t0:Cancel()
-                    DebugAction("TWEEN_CANCEL", "arrived at mob spawn")
+                    CancelActiveTween("arrived at mob spawn")
+                    t0 = nil
 				end
                 DebugAction("MOB_SPAWN_SNAP", "to=" .. DebugSerialize(CFrameMon.Position), 0.50)
 				playerHrp.CFrame = CFrameMon
