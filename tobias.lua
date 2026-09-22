@@ -46,7 +46,10 @@ local Defaults = {
     AttackDelay = 0.20,
     MainLoopDelay = 0.05,
     UtilityLoopDelay = 1,
-    RandomFruitInterval = 60
+    RandomFruitInterval = 60,
+    DebugEnabled = true,
+    VerboseDebug = false,
+    DebugMaxLogs = 80
 }
 
 for key, value in pairs(Defaults) do
@@ -78,11 +81,169 @@ local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
 local CommF_ = ReplicatedStorage.Remotes.CommF_
 
+-- =========================================================
+-- TOBIAS DEBUG / DIAGNOSTICS
+-- =========================================================
+local DebugState = {
+    StartedAt = os.clock(),
+    CurrentFunction = "Boot",
+    PreviousFunction = "-",
+    LastFunctionAt = os.clock(),
+    LastError = "NONE",
+    LastErrorAt = 0,
+    ErrorCount = 0,
+    LastRemote = "NONE",
+    LastRemoteArgs = "-",
+    LastRemoteResult = "-",
+    RemoteCount = 0,
+    LastTarget = "NONE",
+    LastTargetHP = "-",
+    LastQuest = "NONE",
+    LastTween = "NONE",
+    LastTweenDistance = 0,
+    CurrentState = "BOOTING",
+    FunctionCalls = {},
+    FunctionLastDuration = {},
+    RemoteCalls = {},
+    Logs = {},
+    ActiveTests = {},
+}
+
+local function DebugSerialize(value, depth)
+    depth = depth or 0
+    if depth > 2 then return "..." end
+    local kind = typeof(value)
+    if kind == "Instance" then
+        return value:GetFullName()
+    elseif kind == "CFrame" then
+        local p = value.Position
+        return string.format("CFrame(%.0f, %.0f, %.0f)", p.X, p.Y, p.Z)
+    elseif kind == "Vector3" then
+        return string.format("Vector3(%.0f, %.0f, %.0f)", value.X, value.Y, value.Z)
+    elseif type(value) == "table" then
+        local out = {}
+        local count = 0
+        for k, v in pairs(value) do
+            count += 1
+            if count > 5 then
+                table.insert(out, "...")
+                break
+            end
+            table.insert(out, tostring(k) .. "=" .. DebugSerialize(v, depth + 1))
+        end
+        return "{" .. table.concat(out, ", ") .. "}"
+    end
+    local text = tostring(value)
+    if #text > 140 then text = text:sub(1, 137) .. "..." end
+    return text
+end
+
+local function DebugLog(category, message, force)
+    if not Configs.DebugEnabled and not force then return end
+    local entry = string.format("[%s][%s] %s", os.date("%H:%M:%S"), tostring(category), tostring(message))
+    table.insert(DebugState.Logs, 1, entry)
+    local maxLogs = math.clamp(tonumber(Configs.DebugMaxLogs) or 80, 20, 300)
+    while #DebugState.Logs > maxLogs do
+        table.remove(DebugState.Logs)
+    end
+    if Configs.VerboseDebug or category == "ERROR" then
+        warn("[TobiasDebug] " .. entry)
+    end
+end
+
+local function DebugFunction(name, details)
+    DebugState.PreviousFunction = DebugState.CurrentFunction
+    DebugState.CurrentFunction = tostring(name)
+    DebugState.LastFunctionAt = os.clock()
+    DebugState.FunctionCalls[name] = (DebugState.FunctionCalls[name] or 0) + 1
+    if details then
+        DebugLog("FUNC", name .. " | " .. tostring(details))
+    end
+    return os.clock()
+end
+
+local function DebugFunctionEnd(name, startedAt)
+    if startedAt then
+        DebugState.FunctionLastDuration[name] = os.clock() - startedAt
+    end
+end
+
+local function DebugError(where, err)
+    DebugState.ErrorCount += 1
+    DebugState.LastErrorAt = os.clock()
+    DebugState.LastError = tostring(where) .. ": " .. tostring(err)
+    DebugLog("ERROR", DebugState.LastError, true)
+end
+
+local function DebugSetState(state)
+    if DebugState.CurrentState ~= state then
+        DebugState.CurrentState = tostring(state)
+        DebugLog("STATE", DebugState.CurrentState)
+    end
+end
+
+local function DebugInvoke(...)
+    local args = {...}
+    local command = tostring(args[1] or "<no-command>")
+    DebugState.LastRemote = command
+    DebugState.RemoteCount += 1
+    DebugState.RemoteCalls[command] = (DebugState.RemoteCalls[command] or 0) + 1
+
+    local argText = {}
+    for i = 1, math.min(#args, 6) do
+        argText[i] = DebugSerialize(args[i])
+    end
+    DebugState.LastRemoteArgs = table.concat(argText, " | ")
+    DebugLog("REMOTE", DebugState.LastRemoteArgs)
+
+    local packed = table.pack(pcall(function()
+        return CommF_:InvokeServer(table.unpack(args, 1, #args))
+    end))
+    local ok = packed[1]
+    if not ok then
+        DebugState.LastRemoteResult = "ERROR: " .. tostring(packed[2])
+        DebugError("Remote/" .. command, packed[2])
+        return nil
+    end
+
+    DebugState.LastRemoteResult = DebugSerialize(packed[2])
+    return table.unpack(packed, 2, packed.n)
+end
+
+local function DebugTopFunctions(limit)
+    local list = {}
+    for name, count in pairs(DebugState.FunctionCalls) do
+        table.insert(list, {name = name, count = count})
+    end
+    table.sort(list, function(a, b) return a.count > b.count end)
+    local out = {}
+    for i = 1, math.min(limit or 8, #list) do
+        local item = list[i]
+        local duration = DebugState.FunctionLastDuration[item.name]
+        table.insert(out, string.format("%s: %d%s", item.name, item.count,
+            duration and string.format(" (%.3fms)", duration * 1000) or ""))
+    end
+    return table.concat(out, "\n")
+end
+
+local function DebugTopRemotes(limit)
+    local list = {}
+    for name, count in pairs(DebugState.RemoteCalls) do
+        table.insert(list, {name = name, count = count})
+    end
+    table.sort(list, function(a, b) return a.count > b.count end)
+    local out = {}
+    for i = 1, math.min(limit or 8, #list) do
+        table.insert(out, string.format("%s: %d", list[i].name, list[i].count))
+    end
+    return table.concat(out, "\n")
+end
+
 if not LocalPlayer.Team then
     repeat
         task.wait(0.25)
         pcall(function()
-            CommF_:InvokeServer("SetTeam", Configs.Team)
+            DebugInvoke("SetTeam", Configs.Team)
         end)
     until LocalPlayer.Team
 end
@@ -115,6 +276,7 @@ local function GetHRP()
 end
 
 local function TeleportServer(cursor)
+    local __dbgStart = DebugFunction("TeleportServer","cursor=" .. tostring(cursor))
     cursor = cursor or ""
     local placeId = game.PlaceId
     local visitedCursors = {}
@@ -158,6 +320,9 @@ end
 
 local IsTweening = false
 local function Tween(target, speed)
+    local __dbgStart = DebugFunction("Tween",DebugSerialize(target))
+    DebugSetState("TWEENING")
+    DebugState.LastTween = DebugSerialize(target)
     speed = math.max(tonumber(Configs.TweenSpeed) or tonumber(speed) or 350, 1)
     local hrp = GetHRP()
     if not hrp or not target then return nil end
@@ -183,7 +348,7 @@ local function Tween(target, speed)
     if closestEntrance and minEntranceDist < (hrp.Position - target.Position).Magnitude then
         IsTweening = true
         pcall(function()
-            CommF_:InvokeServer("requestEntrance", closestEntrance)
+            DebugInvoke("requestEntrance", closestEntrance)
         end)
         task.wait(0.35)
         hrp = GetHRP()
@@ -194,6 +359,7 @@ local function Tween(target, speed)
     end
 
     local distance = (hrp.Position - target.Position).Magnitude
+    DebugState.LastTweenDistance = distance
     local tween = TweenService:Create(
         hrp,
         TweenInfo.new(distance / speed, Enum.EasingStyle.Linear),
@@ -214,6 +380,7 @@ local CombatRemote
 local CombatRemotePathNames = {"Util", "Remotes", "Assets", "Common", "FX"}
 
 local function FindCombatRemote()
+    local __dbgStart = DebugFunction("FindCombatRemote")
     if CombatRemote and CombatRemote.Parent then
         return CombatRemote
     end
@@ -243,6 +410,7 @@ local seed = ReplicatedStorage.Modules.Net.seed:InvokeServer() * 2
 local LastAttackTime = 0
 
 local function IsOwn(name)
+    local __dbgStart = DebugFunction("IsOwn",tostring(name))
     if type(name) ~= "string" or name == "" then
         return nil
     end
@@ -272,6 +440,7 @@ local function IsAliveMob(mob)
 end
 
 local function TryUseMeleeV()
+    local __dbgStart = DebugFunction("TryUseMeleeV")
     local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
     local main = playerGui and playerGui:FindFirstChild("Main")
     local skills = main and main:FindFirstChild("Skills")
@@ -298,6 +467,8 @@ local function TryUseMeleeV()
 end
 
 local function Attack(target)
+    local __dbgStart = DebugFunction("Attack",DebugSerialize(target))
+    DebugSetState("ATTACKING")
     if os.clock() - LastAttackTime < math.max(tonumber(Configs.AttackDelay) or 0.2, 0.03) then
         return false
     end
@@ -331,7 +502,7 @@ local function Attack(target)
 
     if Configs.AutoBuso and not character:FindFirstChild("HasBuso") then
         pcall(function()
-            CommF_:InvokeServer("Buso")
+            DebugInvoke("Buso")
         end)
     end
 
@@ -348,6 +519,8 @@ local function Attack(target)
     local encoded = table.concat(encodedParts)
 
     local first = targets[1]
+    DebugState.LastTarget = first and first.Name or "NONE"
+    DebugState.LastTargetHP = first and first:FindFirstChild("Humanoid") and string.format("%.0f/%.0f", first.Humanoid.Health, first.Humanoid.MaxHealth) or "-"
     local firstHead = first:FindFirstChild("Head")
     if not firstHead then
         return false
@@ -394,6 +567,7 @@ local function Attack(target)
 end
 
 local function DieWait()
+    local __dbgStart = DebugFunction("DieWait")
     local character = GetCharacter()
     local humanoid = character:FindFirstChildOfClass("Humanoid") or character:WaitForChild("Humanoid")
 
@@ -407,12 +581,13 @@ local function DieWait()
 
     if not character:FindFirstChild("HasBuso") then
         pcall(function()
-            CommF_:InvokeServer("Buso")
+            DebugInvoke("Buso")
         end)
     end
 end
 
 local function EquipWeapon(toolType)
+    local __dbgStart = DebugFunction("EquipWeapon",tostring(toolType))
     local character = LocalPlayer.Character
     local backpack = LocalPlayer:FindFirstChild("Backpack")
     if not character or not backpack then return nil end
@@ -437,6 +612,7 @@ local function EquipWeapon(toolType)
 end
 
 local function EquipName(toolName)
+    local __dbgStart = DebugFunction("EquipName",tostring(toolName))
     local character = LocalPlayer.Character
     local backpack = LocalPlayer:FindFirstChild("Backpack")
     if not character or not backpack then return nil end
@@ -456,12 +632,13 @@ local InventoryCacheAt = 0
 local InventoryCacheTTL = 0.5
 
 local function GetInventory(forceRefresh)
+    local __dbgStart = DebugFunction("GetInventory","force=" .. tostring(forceRefresh))
     if not forceRefresh and os.clock() - InventoryCacheAt <= InventoryCacheTTL then
         return InventoryCache
     end
 
     local ok, result = pcall(function()
-        return CommF_:InvokeServer("getInventory")
+        return DebugInvoke("getInventory")
     end)
 
     if ok and type(result) == "table" then
@@ -477,6 +654,7 @@ local function InvalidateInventoryCache()
 end
 
 local function CheckInv(inv)
+    local __dbgStart = DebugFunction("CheckInv")
     inv = inv or GetInventory(false)
     IsSaber = false
     IsPoleV1 = false
@@ -496,6 +674,7 @@ local function CheckInv(inv)
 end
 
 local function BringMob(a)
+    local __dbgStart = DebugFunction("BringMob",a and a.Name or "nil")
     pcall(sethiddenproperty,LocalPlayer,"SimulationRadius",math.huge)
     local aname = a.Name
     local acf = a.HumanoidRootPart.CFrame
@@ -663,6 +842,7 @@ local subtitle = New("TextLabel", {
     TextTruncate = Enum.TextTruncate.AtEnd, Parent = StatusBar
 })
 
+local DebugCheckQuestRunner
 local Pages = {}
 local TabButtons = {}
 local CurrentTab
@@ -895,6 +1075,7 @@ local CombatPage = AddTab("Combate", 2)
 local ItemsPage = AddTab("Itens", 3)
 local ProgressPage = AddTab("Progressão", 4)
 local SettingsPage = AddTab("Config", 5)
+local DebugPage = AddTab("Debug", 6)
 
 AddSection(MainPage, "FARM")
 AddToggle(MainPage, "Auto Farm Level", "AutoFarmLevel", "Faz quests e elimina os mobs do nível atual.")
@@ -903,7 +1084,7 @@ AddToggle(MainPage, "Auto World Progress", "AutoWorldProgress", "Executa progres
 AddToggle(MainPage, "Auto Factory", "AutoFactory", "Prioriza o Core/Factory quando estiver disponível no Second Sea.")
 AddToggle(MainPage, "Auto Bartilo", "AutoBartilo", "Executa automaticamente a quest do Bartilo.")
 AddDropdown(MainPage, "Time", "Team", {"Pirates", "Marines"}, function(value)
-    pcall(function() CommF_:InvokeServer("SetTeam", value) end)
+    pcall(function() DebugInvoke("SetTeam", value) end)
 end)
 
 AddSection(CombatPage, "COMBATE")
@@ -941,7 +1122,7 @@ AddButton(SettingsPage, "Server Hop", function()
     TeleportServer()
 end)
 AddButton(SettingsPage, "Comprar fruta agora", function()
-    pcall(function() CommF_:InvokeServer("Cousin", "Buy") end)
+    pcall(function() DebugInvoke("Cousin", "Buy") end)
     LastRandomFruitAttempt = os.clock()
 end)
 AddButton(SettingsPage, "Salvar configurações", function()
@@ -962,6 +1143,141 @@ AddButton(SettingsPage, "DESLIGAR TODAS AS AUTOMAÇÕES", function()
     title.Text = "Automações desligadas"
     subtitle.Text = "Todos os toggles automáticos foram desativados"
 end, true)
+
+
+-- ======================== DEBUG TAB ========================
+AddSection(DebugPage, "Diagnóstico em tempo real")
+AddToggle(DebugPage, "Debug ativo", "DebugEnabled", "Registra funções, estados, remotes e erros em tempo real.")
+AddToggle(DebugPage, "Verbose no console", "VerboseDebug", "Também imprime eventos detalhados no console do executor.")
+
+local DebugSummary = New("TextLabel", {
+    Size = UDim2.new(1, -4, 0, 178), BackgroundColor3 = Theme.Surface, BorderSizePixel = 0,
+    Text = "Carregando diagnóstico...", Font = Enum.Font.Code, TextSize = 11,
+    TextColor3 = Theme.Text, TextXAlignment = Enum.TextXAlignment.Left,
+    TextYAlignment = Enum.TextYAlignment.Top, TextWrapped = false, Parent = DebugPage
+})
+New("UICorner", {CornerRadius = UDim.new(0, 8), Parent = DebugSummary})
+New("UIPadding", {PaddingTop = UDim.new(0, 9), PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10), Parent = DebugSummary})
+
+AddSection(DebugPage, "Funções mais chamadas")
+local DebugFunctions = New("TextLabel", {
+    Size = UDim2.new(1, -4, 0, 130), BackgroundColor3 = Theme.Surface, BorderSizePixel = 0,
+    Text = "Nenhuma chamada ainda", Font = Enum.Font.Code, TextSize = 11,
+    TextColor3 = Theme.Muted, TextXAlignment = Enum.TextXAlignment.Left,
+    TextYAlignment = Enum.TextYAlignment.Top, Parent = DebugPage
+})
+New("UICorner", {CornerRadius = UDim.new(0, 8), Parent = DebugFunctions})
+New("UIPadding", {PaddingTop = UDim.new(0, 8), PaddingLeft = UDim.new(0, 10), Parent = DebugFunctions})
+
+AddSection(DebugPage, "Remotes CommF_ mais chamados")
+local DebugRemotes = New("TextLabel", {
+    Size = UDim2.new(1, -4, 0, 130), BackgroundColor3 = Theme.Surface, BorderSizePixel = 0,
+    Text = "Nenhum remote ainda", Font = Enum.Font.Code, TextSize = 11,
+    TextColor3 = Theme.Muted, TextXAlignment = Enum.TextXAlignment.Left,
+    TextYAlignment = Enum.TextYAlignment.Top, Parent = DebugPage
+})
+New("UICorner", {CornerRadius = UDim.new(0, 8), Parent = DebugRemotes})
+New("UIPadding", {PaddingTop = UDim.new(0, 8), PaddingLeft = UDim.new(0, 10), Parent = DebugRemotes})
+
+AddSection(DebugPage, "Últimos eventos")
+local DebugLogs = New("TextLabel", {
+    Size = UDim2.new(1, -4, 0, 220), BackgroundColor3 = Theme.Surface, BorderSizePixel = 0,
+    Text = "Sem eventos", Font = Enum.Font.Code, TextSize = 10,
+    TextColor3 = Theme.Muted, TextXAlignment = Enum.TextXAlignment.Left,
+    TextYAlignment = Enum.TextYAlignment.Top, TextWrapped = true, Parent = DebugPage
+})
+New("UICorner", {CornerRadius = UDim.new(0, 8), Parent = DebugLogs})
+New("UIPadding", {PaddingTop = UDim.new(0, 8), PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10), Parent = DebugLogs})
+
+AddSection(DebugPage, "Testes")
+AddButton(DebugPage, "TESTAR INVENTÁRIO", function()
+    local ok, result = pcall(function() return GetInventory(true) end)
+    if ok and type(result) == "table" then
+        DebugLog("TEST", "Inventário OK | " .. tostring(#result) .. " entradas", true)
+    else
+        DebugError("TestInventory", result or "resultado inválido")
+    end
+end)
+AddButton(DebugPage, "TESTAR CHECK QUEST", function()
+    local ok, err = pcall(function()
+        if not DebugCheckQuestRunner then error("CheckQuest ainda não inicializado") end
+        return DebugCheckQuestRunner()
+    end)
+    if ok then DebugLog("TEST", "CheckQuest OK | " .. tostring(DebugState.LastQuest), true)
+    else DebugError("TestCheckQuest", err) end
+end)
+AddButton(DebugPage, "TESTAR TWEEN CURTO", function()
+    local hrp = GetHRP()
+    if not hrp then return DebugError("TestTween", "HumanoidRootPart ausente") end
+    local ok, err = pcall(function() Tween(hrp.CFrame * CFrame.new(0, 8, 0), math.min(tonumber(Configs.TweenSpeed) or 350, 350)) end)
+    if ok then DebugLog("TEST", "Tween curto iniciado", true) else DebugError("TestTween", err) end
+end)
+AddButton(DebugPage, "LIMPAR LOG", function()
+    table.clear(DebugState.Logs)
+    DebugState.LastError = "NONE"
+    DebugState.ErrorCount = 0
+    DebugLog("DEBUG", "Log limpo", true)
+end)
+AddButton(DebugPage, "COPIAR RELATÓRIO", function()
+    local report = table.concat({
+        "=== TOBIAS DEBUG REPORT ===",
+        "State: " .. tostring(DebugState.CurrentState),
+        "CurrentFunction: " .. tostring(DebugState.CurrentFunction),
+        "LastError: " .. tostring(DebugState.LastError),
+        "LastRemote: " .. tostring(DebugState.LastRemote),
+        "RemoteArgs: " .. tostring(DebugState.LastRemoteArgs),
+        "RemoteResult: " .. tostring(DebugState.LastRemoteResult),
+        "Target: " .. tostring(DebugState.LastTarget) .. " " .. tostring(DebugState.LastTargetHP),
+        "Quest: " .. tostring(DebugState.LastQuest),
+        "Tween: " .. tostring(DebugState.LastTween),
+        "\n-- TOP FUNCTIONS --\n" .. DebugTopFunctions(15),
+        "\n-- TOP REMOTES --\n" .. DebugTopRemotes(15),
+        "\n-- LOG --\n" .. table.concat(DebugState.Logs, "\n")
+    }, "\n")
+    if setclipboard then
+        setclipboard(report)
+        DebugLog("DEBUG", "Relatório copiado para clipboard", true)
+    else
+        warn(report)
+        DebugLog("DEBUG", "setclipboard indisponível; relatório enviado ao console", true)
+    end
+end)
+
+-- Atualizador visual do painel de debug.
+task.spawn(function()
+    while ScreenGui.Parent do
+        if Configs.DebugEnabled and CurrentTab == "Debug" then
+            local character = LocalPlayer.Character
+            local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+            local hrp = character and character:FindFirstChild("HumanoidRootPart")
+            local data = LocalPlayer:FindFirstChild("Data")
+            local levelValue = data and data:FindFirstChild("Level")
+            local questGui = LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("Main")
+            questGui = questGui and questGui:FindFirstChild("Quest")
+
+            DebugSummary.Text = table.concat({
+                "STATE       : " .. tostring(DebugState.CurrentState),
+                "FUNCTION    : " .. tostring(DebugState.CurrentFunction),
+                "ERRORS      : " .. tostring(DebugState.ErrorCount) .. " | " .. tostring(DebugState.LastError),
+                "WORLD/LEVEL : " .. tostring(placeid == 2753915549 and 1 or placeid == 79091703265657 and 2 or placeid == 7449423635 and 3 or 0) .. " / " .. tostring(levelValue and levelValue.Value or "?"),
+                "CHARACTER   : Humanoid=" .. (humanoid and "OK" or "NIL") .. " HRP=" .. (hrp and "OK" or "NIL"),
+                "QUEST GUI   : " .. tostring(questGui and questGui.Visible or false),
+                "QUEST       : " .. tostring(DebugState.LastQuest),
+                "TARGET      : " .. tostring(DebugState.LastTarget) .. " | HP " .. tostring(DebugState.LastTargetHP),
+                "TWEEN       : " .. tostring(IsTweening) .. " | Dist " .. string.format("%.0f", DebugState.LastTweenDistance or 0),
+                "REMOTE      : " .. tostring(DebugState.LastRemote) .. " | Total " .. tostring(DebugState.RemoteCount),
+                "ARGS        : " .. tostring(DebugState.LastRemoteArgs),
+                "RETURN      : " .. tostring(DebugState.LastRemoteResult),
+            }, "\n")
+            DebugFunctions.Text = DebugTopFunctions(9)
+            DebugRemotes.Text = DebugTopRemotes(9)
+            local visibleLogs = {}
+            for i = 1, math.min(12, #DebugState.Logs) do visibleLogs[i] = DebugState.Logs[i] end
+            DebugLogs.Text = #visibleLogs > 0 and table.concat(visibleLogs, "\n") or "Sem eventos"
+        end
+        task.wait(0.25)
+    end
+end)
 
 SelectTab("Principal")
 
@@ -1032,6 +1348,8 @@ local function GetWorld()
     end
 end
 local function CheckQuest()
+    local __dbgStart = DebugFunction("CheckQuest")
+    DebugSetState("CHECKING_QUEST")
     local Level = LocalPlayer.Data.Level.Value
     if World1 then
 		if Level == 1 or Level <= 9 then -- Bandit
@@ -1379,7 +1697,9 @@ local function CheckQuest()
     if World3 then
 
     end
+    DebugState.LastQuest = string.format("%s | LvQuest %s | Mob %s", tostring(NameQuest), tostring(LevelQuest), tostring(Monster))
 end
+DebugCheckQuestRunner = CheckQuest
 task.spawn(function()
     if not Configs.AutoRedeemCodes then return end
 	local codes = {"BANEXPLOIT", "NOMOREHACKS", "WildDares", "BossBuild", "GetPranked", "EARN_FRUITS", "Sub2UncleKizaru", "FIGHT4FRUIT", "kittgaming", "TRIPLEABUSE", "Sub2CaptainMaui", "Sub2Fer999", "Enyu_is_Pro", "Magicbus", "JCWK", "Starcodeheo", "Bluxxy", "SUB2GAMERROBOT_EXP1", "Sub2NoobMaster123", "Sub2Daigrock", "Axiore", "TantaiGaming", "StrawHatMaine", "Sub2OfficialNoobie", "TheGreatAce", "SEATROLLIN", "24NOADMIN", "ADMIN_TROLL", "NEWTROLL", "SECRET_ADMIN", "staffbattle", "NOEXPLOIT", "NOOB2ADMIN", "CODESLIDE", "fruitconcepts"}
@@ -1388,6 +1708,7 @@ task.spawn(function()
 	end
 end)
 local function GetNearestMob(originMob, maxDistance)
+    local __dbgStart = DebugFunction("GetNearestMob",originMob and originMob.Name or "nil")
     if not originMob or not originMob:FindFirstChild("HumanoidRootPart") then
         return nil
     end
@@ -1412,6 +1733,9 @@ local function GetNearestMob(originMob, maxDistance)
 end
 
 local function SmartMoveAndAttack(mainMob, QuestTitle, Quest, IsCheckQuest, CustomName)
+    local __dbgStart = DebugFunction("SmartMoveAndAttack",mainMob and mainMob.Name or "nil")
+    DebugSetState("SMART_COMBAT")
+    DebugState.LastTarget = mainMob and mainMob.Name or "NONE"
     if IsCheckQuest == nil then IsCheckQuest = true end
     CustomName = CustomName or NameCheckQuest
 
@@ -1526,11 +1850,12 @@ local function SmartMoveAndAttack(mainMob, QuestTitle, Quest, IsCheckQuest, Cust
 end
 
 local function KaitunWorld1(Quest,QuestTitle,Level)
+    local __dbgStart = DebugFunction("KaitunWorld1","Level=" .. tostring(Level))
 	CheckInv()
 	if Level >= 700 and Configs.AutoWorldProgress then
 		title.Text = "Doing Second Sea Puzzle"
-		local canTravel = CommF_:InvokeServer("DressrosaQuestProgress", "Dressrosa")
-		local dressrosaProgress = CommF_:InvokeServer("DressrosaQuestProgress")
+		local canTravel = DebugInvoke("DressrosaQuestProgress", "Dressrosa")
+		local dressrosaProgress = DebugInvoke("DressrosaQuestProgress")
 		if not canTravel then
 			if type(dressrosaProgress) == "table" and dressrosaProgress.TalkedDetective and dressrosaProgress.UsedKey then
 				if workspace.Enemies:FindFirstChild("Ice Admiral") then
@@ -1538,7 +1863,7 @@ local function KaitunWorld1(Quest,QuestTitle,Level)
 						if v:IsA("Model") and v:FindFirstChild("Humanoid") and v:FindFirstChild("HumanoidRootPart") and v.Humanoid.Health > 0 and v.Name == "Ice Admiral" then
                             SmartMoveAndAttack(v, QuestTitle, Quest, false)
 							title.Text = "Travel To Second Sea"
-							CommF_:InvokeServer("TravelDressrosa")
+							DebugInvoke("TravelDressrosa")
 						end
 					end
 				else
@@ -1546,21 +1871,21 @@ local function KaitunWorld1(Quest,QuestTitle,Level)
 					t0.Completed:Wait()
 				end
 			elseif IsOwn("Key") then
-				CommF_:InvokeServer("DressrosaQuestProgress","UseKey")
+				DebugInvoke("DressrosaQuestProgress","UseKey")
 			elseif not IsOwn("Key") then
-				CommF_:InvokeServer("DressrosaQuestProgress","Detective")
+				DebugInvoke("DressrosaQuestProgress","Detective")
 			end
 		else
 			title.Text = "Travel To Second Sea"
-			CommF_:InvokeServer("TravelDressrosa")
+			DebugInvoke("TravelDressrosa")
 		end
 	elseif Level >= 200 and getgenv().Configs.Saber and workspace.Map.Jungle.Final.Part.CanCollide and not IsSaber then
 		title.Text = "Saber Quest | Solve Puzzle"
 		if not workspace.Map.Jungle.QuestPlates.Door.CanCollide then
-			local proProgress = CommF_:InvokeServer("ProQuestProgress")
+			local proProgress = DebugInvoke("ProQuestProgress")
 			if type(proProgress) == "table" and proProgress.UsedTorch then
-				if CommF_:InvokeServer("ProQuestProgress","SickMan") == 0 then
-					if CommF_:InvokeServer("ProQuestProgress","RichSon") == 0 then
+				if DebugInvoke("ProQuestProgress","SickMan") == 0 then
+					if DebugInvoke("ProQuestProgress","RichSon") == 0 then
 						if workspace.Enemies:FindFirstChild("Mob Leader") then
 							for _, v in workspace.Enemies:GetChildren() do
 								if v:IsA("Model") and v:FindFirstChild("Humanoid") and v:FindFirstChild("HumanoidRootPart") and v.Humanoid.Health > 0 and v.Name == "Mob Leader" then
@@ -1577,24 +1902,24 @@ local function KaitunWorld1(Quest,QuestTitle,Level)
 								LocalPlayer.Character.HumanoidRootPart.CFrame = CFrame.new(-2848, 8, 5342)
 							end
 						end
-					elseif CommF_:InvokeServer("ProQuestProgress","RichSon") == 1 then
-						CommF_:InvokeServer("ProQuestProgress","PlaceRelic")
+					elseif DebugInvoke("ProQuestProgress","RichSon") == 1 then
+						DebugInvoke("ProQuestProgress","PlaceRelic")
 					else
-						CommF_:InvokeServer("ProQuestProgress","RichSon")
+						DebugInvoke("ProQuestProgress","RichSon")
 					end
 				else
-					CommF_:InvokeServer("ProQuestProgress","GetCup")
+					DebugInvoke("ProQuestProgress","GetCup")
 					task.wait(0.2)
 					EquipName("Cup")
 					task.wait(0.2)
 					local cup = IsOwn("Cup")
-					CommF_:InvokeServer("ProQuestProgress","FillCup",cup)
-					CommF_:InvokeServer("ProQuestProgress","SickMan")
+					DebugInvoke("ProQuestProgress","FillCup",cup)
+					DebugInvoke("ProQuestProgress","SickMan")
 				end
 			elseif IsOwn("Torch") then
-				CommF_:InvokeServer("ProQuestProgress","DestroyTorch")
+				DebugInvoke("ProQuestProgress","DestroyTorch")
 			elseif not IsOwn("Torch") then
-				CommF_:InvokeServer("ProQuestProgress","GetTorch")
+				DebugInvoke("ProQuestProgress","GetTorch")
 			end
 		else
 			for i, v in workspace.Map.Jungle.QuestPlates:GetChildren() do
@@ -1631,7 +1956,7 @@ local function KaitunWorld1(Quest,QuestTitle,Level)
 				end
 				LocalPlayer.Character.HumanoidRootPart.CFrame = CFrame.new(-1458.89502, 29.8870335, -50.633564)
 			end
-			CommF_:InvokeServer("SetSpawnPoint")
+			DebugInvoke("SetSpawnPoint")
 		end
 	elseif Level >= 200 and getgenv().Configs.Pole and not IsPoleV1 and (ReplicatedStorage:FindFirstChild("Thunder God") or workspace.Enemies:FindFirstChild("Thunder God")) then
 		title.Text = "Get Pole | Kill Thunder God"
@@ -1650,7 +1975,7 @@ local function KaitunWorld1(Quest,QuestTitle,Level)
 				end
 				LocalPlayer.Character.HumanoidRootPart.CFrame = CFrame.new(-7795.9287109375, 5605.951171875, -2231.444580078125)
 			end
-			CommF_:InvokeServer("SetSpawnPoint")
+			DebugInvoke("SetSpawnPoint")
 		end
 	elseif getgenv().Configs.SkipFarmLevel and (Level >= 0 and Level <= 24) then
 		if workspace.Enemies:FindFirstChild("Dark Master") then
@@ -1701,8 +2026,8 @@ local function KaitunWorld1(Quest,QuestTitle,Level)
 				t2:Cancel()
 			end
 			LocalPlayer.Character.HumanoidRootPart.CFrame = CFrameQ
-			CommF_:InvokeServer("StartQuest",NameQuest,LevelQuest)
-			CommF_:InvokeServer("SetSpawnPoint")
+			DebugInvoke("StartQuest",NameQuest,LevelQuest)
+			DebugInvoke("SetSpawnPoint")
 		end
 	elseif Quest.Visible then
 		if workspace.Enemies:FindFirstChild(Monster) then
@@ -1711,7 +2036,7 @@ local function KaitunWorld1(Quest,QuestTitle,Level)
 					if string.find(QuestTitle.Text, NameCheckQuest) then
                         SmartMoveAndAttack(v, QuestTitle, Quest)
 					else
-						CommF_:InvokeServer("AbandonQuest")
+						DebugInvoke("AbandonQuest")
 					end
 				end
 			end
@@ -1729,10 +2054,11 @@ local function KaitunWorld1(Quest,QuestTitle,Level)
 	end
 end
 local function KaitunWorld2(Quest,QuestTitle,Level)
+    local __dbgStart = DebugFunction("KaitunWorld2","Level=" .. tostring(Level))
 	CheckInv()
 	local bartiloProgress
 	if Level >= 850 then
-		bartiloProgress = CommF_:InvokeServer("BartiloQuestProgress", "Bartilo")
+		bartiloProgress = DebugInvoke("BartiloQuestProgress", "Bartilo")
 	end
 	if Configs.AutoFactory and (workspace.Enemies:FindFirstChild("Core") or ReplicatedStorage:FindFirstChild("Core")) then
 		if workspace.Enemies:FindFirstChild("Core") then
@@ -1766,10 +2092,10 @@ local function KaitunWorld2(Quest,QuestTitle,Level)
                         end
                     end
                 else
-                    CommF_:InvokeServer("AbandonQuest")
+                    DebugInvoke("AbandonQuest")
                 end
             else
-                CommF_:InvokeServer("StartQuest","BartiloQuest",1)
+                DebugInvoke("StartQuest","BartiloQuest",1)
             end
         elseif bartiloProgress == 1 and (workspace.Enemies:FindFirstChild("Jeremy") or ReplicatedStorage:FindFirstChild("Jeremy")) then
             if workspace.Enemies:FindFirstChild("Jeremy") then
@@ -1787,7 +2113,7 @@ local function KaitunWorld2(Quest,QuestTitle,Level)
                     end
                     LocalPlayer.Character.HumanoidRootPart.CFrame = CFrame.new(2099.88159, 448.931, 648.997375)
                 end
-                CommF_:InvokeServer("SetSpawnPoint")
+                DebugInvoke("SetSpawnPoint")
             end
         elseif bartiloProgress == 2 then
             local plates = {}
@@ -1842,8 +2168,8 @@ local function KaitunWorld2(Quest,QuestTitle,Level)
 				t2:Cancel()
 			end
 			LocalPlayer.Character.HumanoidRootPart.CFrame = CFrameQ
-			CommF_:InvokeServer("StartQuest",NameQuest,LevelQuest)
-			CommF_:InvokeServer("SetSpawnPoint")
+			DebugInvoke("StartQuest",NameQuest,LevelQuest)
+			DebugInvoke("SetSpawnPoint")
 		end
 	elseif Quest.Visible then
 		if workspace.Enemies:FindFirstChild(Monster) then
@@ -1852,7 +2178,7 @@ local function KaitunWorld2(Quest,QuestTitle,Level)
 					if string.find(QuestTitle.Text, NameCheckQuest) then
                         SmartMoveAndAttack(v, QuestTitle, Quest)
 					else
-						CommF_:InvokeServer("AbandonQuest")
+						DebugInvoke("AbandonQuest")
 					end
 				end
 			end
@@ -2022,7 +2348,7 @@ end
 for _, styleName in ipairs(MeleeOrder) do
     local data = Melees[styleName]
     local ok, status = pcall(function()
-        return CommF_:InvokeServer(data.BuyID, true)
+        return DebugInvoke(data.BuyID, true)
     end)
     if ok and status == 1 then
         MarkPrerequisitesComplete(styleName)
@@ -2055,7 +2381,7 @@ local function StoreFruitTool(tool, inventoryNames)
     end
 
     local ok = pcall(function()
-        CommF_:InvokeServer("StoreFruit", originalName, tool)
+        DebugInvoke("StoreFruit", originalName, tool)
     end)
 
     if ok then
@@ -2067,6 +2393,7 @@ local function StoreFruitTool(tool, inventoryNames)
 end
 
 local function HandleFruits()
+    local __dbgStart = DebugFunction("HandleFruits")
     local inv = GetInventory(false)
     local inventoryNames = BuildInventoryNameSet(inv)
     local hrp = GetHRP()
@@ -2119,6 +2446,7 @@ local function HandleFruits()
 end
 
 local function GetCurrentMelee()
+    local __dbgStart = DebugFunction("GetCurrentMelee")
     local character = LocalPlayer.Character
     if character then
         for _, tool in ipairs(character:GetChildren()) do
@@ -2138,12 +2466,14 @@ local function GetCurrentMelee()
 end
 
 local function GetMeleeMastery(styleName)
+    local __dbgStart = DebugFunction("GetMeleeMastery",tostring(styleName))
     local tool = IsOwn(styleName)
     local level = tool and tool:FindFirstChild("Level")
     return level and tonumber(level.Value) or 0
 end
 
 local function MoveToMeleeNPC(data)
+    local __dbgStart = DebugFunction("MoveToMeleeNPC",data and data.Name or "nil")
     local workspaceNPCs = workspace:FindFirstChild("NPCs")
     local replicatedNPCs = ReplicatedStorage:FindFirstChild("NPCs")
     local npc = (workspaceNPCs and workspaceNPCs:FindFirstChild(data.NPC))
@@ -2161,6 +2491,7 @@ local function MoveToMeleeNPC(data)
 end
 
 local function HasResourcesForMelee(data)
+    local __dbgStart = DebugFunction("HasResourcesForMelee",data and data.Name or "nil")
     local beli = LocalPlayer.Data.Beli.Value
     if beli < data.Price.Beli then
         return false
@@ -2177,6 +2508,7 @@ local function HasResourcesForMelee(data)
 end
 
 local function ProgressMelee()
+    local __dbgStart = DebugFunction("ProgressMelee")
     local currentName = GetCurrentMelee()
 
     if currentName and currentName ~= "Combat" and Melees[currentName] then
@@ -2216,7 +2548,7 @@ local function ProgressMelee()
         end
 
         local ok, status = pcall(function()
-            return CommF_:InvokeServer(data.BuyID, true)
+            return DebugInvoke(data.BuyID, true)
         end)
 
         if (ok and status == 1) or HasResourcesForMelee(data) then
@@ -2224,7 +2556,7 @@ local function ProgressMelee()
             MoveToMeleeNPC(data)
 
             pcall(function()
-                CommF_:InvokeServer(data.BuyID)
+                DebugInvoke(data.BuyID)
             end)
 
             task.wait(0.1)
@@ -2242,6 +2574,8 @@ local function ProgressMelee()
 end
 
 local function RunMainCycle()
+    local __dbgStart = DebugFunction("RunMainCycle")
+    DebugSetState("MAIN_CYCLE")
     DieWait()
 
     if Configs.AutoFruitPickup or Configs.AutoStoreFruit then
@@ -2288,6 +2622,7 @@ task.spawn(function()
         local ok, err = pcall(RunMainCycle)
         if not ok then
             subtitle.Text = "Recovering from runtime error"
+            DebugError("MainLoop", err)
             warn("[Kaitun/Main] " .. tostring(err))
             task.wait(0.5)
         end
@@ -2297,6 +2632,7 @@ end)
 LastRandomFruitAttempt = LastRandomFruitAttempt or 0
 
 local function SpendStatPoints()
+    local __dbgStart = DebugFunction("SpendStatPoints")
     local data = LocalPlayer.Data
     local pointsValue = data.Points.Value
     if pointsValue <= 0 then return end
@@ -2311,13 +2647,13 @@ local function SpendStatPoints()
 
     local addMelee = math.max(0, math.min(pointsValue, targetMelee - melee))
     if addMelee > 0 then
-        CommF_:InvokeServer("AddPoint", "Melee", addMelee)
+        DebugInvoke("AddPoint", "Melee", addMelee)
         pointsValue -= addMelee
     end
 
     local addDefense = math.max(0, math.min(pointsValue, targetDefense - defense))
     if addDefense > 0 then
-        CommF_:InvokeServer("AddPoint", "Defense", addDefense)
+        DebugInvoke("AddPoint", "Defense", addDefense)
         pointsValue -= addDefense
     end
 
@@ -2325,12 +2661,13 @@ local function SpendStatPoints()
         local targetSword = math.max(0, math.min(MaxLevel, level * 3 - MaxLevel * 2))
         local addSword = math.max(0, math.min(pointsValue, targetSword - sword))
         if addSword > 0 then
-            CommF_:InvokeServer("AddPoint", "Sword", addSword)
+            DebugInvoke("AddPoint", "Sword", addSword)
         end
     end
 end
 
 local function RunUtilityCycle()
+    local __dbgStart = DebugFunction("RunUtilityCycle")
     local character = LocalPlayer.Character
     if not character then return end
 
@@ -2340,22 +2677,22 @@ local function RunUtilityCycle()
 
     if Configs.AutoHaki then
         if not CollectionService:HasTag(character, "Buso") and LocalPlayer.Data.Beli.Value >= 25000 then
-            CommF_:InvokeServer("BuyHaki", "Buso")
+            DebugInvoke("BuyHaki", "Buso")
         end
         if not CollectionService:HasTag(character, "Geppo") and LocalPlayer.Data.Beli.Value >= 10000 then
-            CommF_:InvokeServer("BuyHaki", "Geppo")
+            DebugInvoke("BuyHaki", "Geppo")
         end
         if not CollectionService:HasTag(character, "Soru") and LocalPlayer.Data.Beli.Value >= 100000 then
-            CommF_:InvokeServer("BuyHaki", "Soru")
+            DebugInvoke("BuyHaki", "Soru")
         end
         if not CollectionService:HasTag(character, "Ken") and World1 and LocalPlayer.Data.Beli.Value >= 750000 then
-            CommF_:InvokeServer("KenTalk", "Buy")
+            DebugInvoke("KenTalk", "Buy")
         end
     end
 
     if Configs.AutoRandomFruit and os.clock() - LastRandomFruitAttempt >= (tonumber(Configs.RandomFruitInterval) or 60) then
         LastRandomFruitAttempt = os.clock()
-        CommF_:InvokeServer("Cousin", "Buy")
+        DebugInvoke("Cousin", "Buy")
     end
 end
 
@@ -2363,8 +2700,8 @@ task.spawn(function()
     while task.wait(math.max(tonumber(Configs.UtilityLoopDelay) or 1, 0.1)) do
         local ok, err = pcall(RunUtilityCycle)
         if not ok then
+            DebugError("UtilityLoop", err)
             warn("[Kaitun/Utility] " .. tostring(err))
         end
     end
 end)
-
