@@ -1,14 +1,67 @@
+-- Tobias Hub v2
+-- Menu: RightShift | Configs salvas quando o executor suporta writefile/readfile
+
 getgenv().Configs = getgenv().Configs or {}
 local Configs = getgenv().Configs
+local ConfigHttpService = game:GetService("HttpService")
+local CONFIG_FILE = "tobias_hub_config.json"
 
-if Configs.Team == nil then Configs.Team = "Pirates" end -- Marines/Pirates
-if Configs.Saber == nil then Configs.Saber = true end
-if Configs.Pole == nil then Configs.Pole = true end
-if Configs.SkipFarmLevel == nil then Configs.SkipFarmLevel = true end
-if Configs.AutoRandomFruit == nil then Configs.AutoRandomFruit = true end
-if Configs.MainLoopDelay == nil then Configs.MainLoopDelay = 0.05 end
-if Configs.UtilityLoopDelay == nil then Configs.UtilityLoopDelay = 1 end
-if Configs.RandomFruitInterval == nil then Configs.RandomFruitInterval = 60 end
+-- Load saved settings when the executor supports file APIs.
+do
+    local ok, saved = pcall(function()
+        if isfile and readfile and isfile(CONFIG_FILE) then
+            return ConfigHttpService:JSONDecode(readfile(CONFIG_FILE))
+        end
+    end)
+    if ok and type(saved) == "table" then
+        for key, value in pairs(saved) do
+            Configs[key] = value
+        end
+    end
+end
+
+local Defaults = {
+    Team = "Pirates",
+    AutoFarmLevel = true,
+    Saber = true,
+    Pole = true,
+    SkipFarmLevel = true,
+    AutoWorldProgress = true,
+    AutoFactory = true,
+    AutoBartilo = true,
+    AutoFruitPickup = true,
+    AutoStoreFruit = true,
+    AutoRandomFruit = true,
+    AutoRedeemCodes = true,
+    DisableCameraShake = true,
+    AutoMelee = true,
+    AutoStats = true,
+    AutoHaki = true,
+    AutoBuso = true,
+    AutoMeleeSkill = true,
+    BringMobs = true,
+    TweenSpeed = 350,
+    FarmHeight = 30,
+    BringDistance = 350,
+    AttackDelay = 0.20,
+    MainLoopDelay = 0.05,
+    UtilityLoopDelay = 1,
+    RandomFruitInterval = 60
+}
+
+for key, value in pairs(Defaults) do
+    if Configs[key] == nil then
+        Configs[key] = value
+    end
+end
+
+local function SaveConfigs()
+    pcall(function()
+        if writefile then
+            writefile(CONFIG_FILE, ConfigHttpService:JSONEncode(Configs))
+        end
+    end)
+end
 
 if not game:IsLoaded() then
     game.Loaded:Wait()
@@ -21,6 +74,7 @@ local Players = game:GetService("Players")
 local CollectionService = game:GetService("CollectionService")
 local HttpService = game:GetService("HttpService")
 local VirtualInputManager = game:GetService("VirtualInputManager")
+local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
 local CommF_ = ReplicatedStorage.Remotes.CommF_
 
@@ -41,6 +95,7 @@ local v106 = tostring(LocalPlayer.UserId):sub(2, 4) .. tostring(coroutine.runnin
 local placeid = game.PlaceId
 local AttackRotation = 0
 local LastRotate = 0
+local LastRandomFruitAttempt = 0
 
 -- Game state
 local MaxLevel = game:GetAttribute("LEVEL_CAP") or 2800
@@ -103,7 +158,7 @@ end
 
 local IsTweening = false
 local function Tween(target, speed)
-    speed = math.max(tonumber(speed) or 350, 1)
+    speed = math.max(tonumber(Configs.TweenSpeed) or tonumber(speed) or 350, 1)
     local hrp = GetHRP()
     if not hrp or not target then return nil end
 
@@ -243,7 +298,7 @@ local function TryUseMeleeV()
 end
 
 local function Attack(target)
-    if os.clock() - LastAttackTime < 0.2 then
+    if os.clock() - LastAttackTime < math.max(tonumber(Configs.AttackDelay) or 0.2, 0.03) then
         return false
     end
 
@@ -274,13 +329,15 @@ local function Attack(target)
 
     LastAttackTime = os.clock()
 
-    if not character:FindFirstChild("HasBuso") then
+    if Configs.AutoBuso and not character:FindFirstChild("HasBuso") then
         pcall(function()
             CommF_:InvokeServer("Buso")
         end)
     end
 
-    TryUseMeleeV()
+    if Configs.AutoMeleeSkill then
+        TryUseMeleeV()
+    end
 
     local h = "RE/RegisterHit"
     local key = math.floor(workspace:GetServerTimeNow() / 10 % 10)
@@ -445,7 +502,7 @@ local function BringMob(a)
     local targets = {}
     table.insert(targets, {a, a:FindFirstChild("Head")})
     for _, v in ipairs(workspace.Enemies:GetChildren()) do
-        if string.find(v.Name:lower(), aname:lower(), 1, true) and not v:FindFirstChild("BringCheck") and v:FindFirstChild("Humanoid") and v:FindFirstChild("HumanoidRootPart") and v.Humanoid.Health > 0 and (acf.Position - v.HumanoidRootPart.Position).Magnitude <= 350 then
+        if string.find(v.Name:lower(), aname:lower(), 1, true) and not v:FindFirstChild("BringCheck") and v:FindFirstChild("Humanoid") and v:FindFirstChild("HumanoidRootPart") and v.Humanoid.Health > 0 and (acf.Position - v.HumanoidRootPart.Position).Magnitude <= (tonumber(Configs.BringDistance) or 350) then
             local bv = v.HumanoidRootPart:FindFirstChild("BringVelocity")
             if not bv then
                 bv = Instance.new("BodyVelocity")
@@ -461,82 +518,482 @@ local function BringMob(a)
     end
     return targets
 end
---UI
+-- UI / Tobias Hub
+local oldGui = game.CoreGui:FindFirstChild("TobiasHub")
+if oldGui then
+    oldGui:Destroy()
+end
+
 local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "TobiasHub"
 ScreenGui.ResetOnSpawn = false
+ScreenGui.IgnoreGuiInset = true
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 ScreenGui.Parent = game.CoreGui
-local frame = Instance.new("Frame")
-frame.Size = UDim2.new(0, 500, 0, 75)
-frame.Position = UDim2.new(0.5, -250, 0, 30)
-frame.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
-frame.BackgroundTransparency = 0.2
-frame.Parent = ScreenGui
-local corner = Instance.new("UICorner")
-corner.CornerRadius = UDim.new(0, 10)
-corner.Parent = frame
-local edge = Instance.new("UIStroke")
-edge.Color = Color3.fromRGB(0, 0, 0)
-edge.Thickness = 3.5
-edge.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-edge.Parent = frame
-local layout = Instance.new("UIListLayout")
-layout.Parent = frame
-layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
-layout.VerticalAlignment = Enum.VerticalAlignment.Center
-layout.SortOrder = Enum.SortOrder.LayoutOrder
-layout.Padding = UDim.new(0, 5)
-local title = Instance.new("TextLabel")
-title.Size = UDim2.new(1, -20, 0, 40)
-title.BackgroundTransparency = 1
-title.Text = "Idling"
-title.Font = Enum.Font.GothamBold
-title.TextScaled = false
-title.TextSize = 22
-title.TextColor3 = Color3.fromRGB(200, 200, 200)
-title.LayoutOrder = 1
-title.Parent = frame
-local subtitle = Instance.new("TextLabel")
-subtitle.Size = UDim2.new(1, -20, 0, 30)
-subtitle.BackgroundTransparency = 1
-subtitle.Text = "No Subtask"
-subtitle.Font = Enum.Font.GothamSemibold
-subtitle.TextScaled = false
-subtitle.TextSize = 20
-subtitle.TextColor3 = Color3.fromRGB(200, 200, 200)
-subtitle.LayoutOrder = 2
-subtitle.Parent = frame
-local TimeL = Instance.new("TextLabel")
-TimeL.Size = UDim2.new(0, 500, 0, 30)
-TimeL.Position = UDim2.new(0.5, -250, 0, 0)
-TimeL.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
-TimeL.BackgroundTransparency = 0.2
-TimeL.Text = ""
-TimeL.Font = Enum.Font.GothamBold
-TimeL.TextScaled = false
-TimeL.TextSize = 20
-TimeL.TextColor3 = Color3.fromRGB(200, 200, 200)
-TimeL.Parent = ScreenGui
-local TimeC = Instance.new("UICorner")
-TimeC.CornerRadius = UDim.new(0, 10)
-TimeC.Parent = TimeL
-local TimeS = Instance.new("UIStroke")
-TimeS.Color = Color3.fromRGB(0, 0, 0)
-TimeS.Thickness = 3.5
-TimeS.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-TimeS.Parent = TimeL
-task.spawn(function()
-    while task.wait(1) do
-		local t = os.date("*t")
-        TimeL.Text = string.format("%02d:%02d:%02d  |  %s, %s %d, %d",t.hour,t.min,t.sec,os.date("%A"),os.date("%B"),t.day,t.year)
+
+local Theme = {
+    Background = Color3.fromRGB(17, 18, 24),
+    Surface = Color3.fromRGB(26, 28, 36),
+    Surface2 = Color3.fromRGB(35, 38, 49),
+    Accent = Color3.fromRGB(121, 82, 255),
+    Accent2 = Color3.fromRGB(86, 183, 255),
+    Text = Color3.fromRGB(240, 241, 246),
+    Muted = Color3.fromRGB(151, 155, 173),
+    Good = Color3.fromRGB(77, 214, 139),
+    Bad = Color3.fromRGB(245, 91, 112)
+}
+
+local function New(className, props)
+    local object = Instance.new(className)
+    for key, value in pairs(props or {}) do
+        if key ~= "Parent" then
+            object[key] = value
+        end
+    end
+    if props and props.Parent then
+        object.Parent = props.Parent
+    end
+    return object
+end
+
+local MainWindow = New("Frame", {
+    Name = "MainWindow",
+    Size = UDim2.fromOffset(650, 470),
+    Position = UDim2.new(0.5, -325, 0.5, -235),
+    BackgroundColor3 = Theme.Background,
+    BorderSizePixel = 0,
+    Parent = ScreenGui
+})
+New("UICorner", {CornerRadius = UDim.new(0, 12), Parent = MainWindow})
+New("UIStroke", {Color = Color3.fromRGB(57, 61, 78), Thickness = 1, Transparency = 0.15, Parent = MainWindow})
+
+local TopBar = New("Frame", {
+    Size = UDim2.new(1, 0, 0, 54),
+    BackgroundColor3 = Theme.Surface,
+    BorderSizePixel = 0,
+    Parent = MainWindow
+})
+New("UICorner", {CornerRadius = UDim.new(0, 12), Parent = TopBar})
+New("Frame", {
+    Size = UDim2.new(1, 0, 0, 12), Position = UDim2.new(0, 0, 1, -12),
+    BackgroundColor3 = Theme.Surface, BorderSizePixel = 0, Parent = TopBar
+})
+
+New("TextLabel", {
+    Size = UDim2.new(0, 230, 1, 0), Position = UDim2.fromOffset(18, 0),
+    BackgroundTransparency = 1, Text = "TOBIAS HUB",
+    Font = Enum.Font.GothamBold, TextSize = 21, TextColor3 = Theme.Text,
+    TextXAlignment = Enum.TextXAlignment.Left, Parent = TopBar
+})
+
+local HotkeyHint = New("TextLabel", {
+    Size = UDim2.new(0, 180, 1, 0), Position = UDim2.new(1, -220, 0, 0),
+    BackgroundTransparency = 1, Text = "RightShift  •  mostrar/ocultar",
+    Font = Enum.Font.Gotham, TextSize = 12, TextColor3 = Theme.Muted,
+    TextXAlignment = Enum.TextXAlignment.Right, Parent = TopBar
+})
+
+local CloseButton = New("TextButton", {
+    Size = UDim2.fromOffset(32, 32), Position = UDim2.new(1, -42, 0.5, -16),
+    BackgroundColor3 = Theme.Surface2, Text = "×", AutoButtonColor = false,
+    Font = Enum.Font.GothamBold, TextSize = 22, TextColor3 = Theme.Text, Parent = TopBar
+})
+New("UICorner", {CornerRadius = UDim.new(0, 8), Parent = CloseButton})
+CloseButton.MouseButton1Click:Connect(function()
+    MainWindow.Visible = false
+end)
+
+-- Dragging
+local dragging = false
+local dragStart
+local startPosition
+TopBar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        dragging = true
+        dragStart = input.Position
+        startPosition = MainWindow.Position
     end
 end)
+TopBar.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        dragging = false
+    end
+end)
+UserInputService.InputChanged:Connect(function(input)
+    if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+        local delta = input.Position - dragStart
+        MainWindow.Position = UDim2.new(
+            startPosition.X.Scale, startPosition.X.Offset + delta.X,
+            startPosition.Y.Scale, startPosition.Y.Offset + delta.Y
+        )
+    end
+end)
+
+local Sidebar = New("Frame", {
+    Size = UDim2.new(0, 150, 1, -54), Position = UDim2.fromOffset(0, 54),
+    BackgroundColor3 = Theme.Surface, BorderSizePixel = 0, Parent = MainWindow
+})
+local SidebarLayout = New("UIListLayout", {
+    Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder,
+    HorizontalAlignment = Enum.HorizontalAlignment.Center, Parent = Sidebar
+})
+New("UIPadding", {PaddingTop = UDim.new(0, 12), Parent = Sidebar})
+
+local Content = New("Frame", {
+    Size = UDim2.new(1, -150, 1, -54), Position = UDim2.fromOffset(150, 54),
+    BackgroundTransparency = 1, Parent = MainWindow
+})
+
+local StatusBar = New("Frame", {
+    Size = UDim2.new(1, -24, 0, 58), Position = UDim2.new(0, 12, 1, -70),
+    BackgroundColor3 = Theme.Surface, BorderSizePixel = 0, Parent = Content
+})
+New("UICorner", {CornerRadius = UDim.new(0, 9), Parent = StatusBar})
+
+local title = New("TextLabel", {
+    Size = UDim2.new(1, -20, 0, 27), Position = UDim2.fromOffset(10, 5),
+    BackgroundTransparency = 1, Text = "Idling", Font = Enum.Font.GothamBold,
+    TextSize = 14, TextColor3 = Theme.Text, TextXAlignment = Enum.TextXAlignment.Left,
+    TextTruncate = Enum.TextTruncate.AtEnd, Parent = StatusBar
+})
+local subtitle = New("TextLabel", {
+    Size = UDim2.new(1, -20, 0, 22), Position = UDim2.fromOffset(10, 29),
+    BackgroundTransparency = 1, Text = "No Subtask", Font = Enum.Font.Gotham,
+    TextSize = 12, TextColor3 = Theme.Muted, TextXAlignment = Enum.TextXAlignment.Left,
+    TextTruncate = Enum.TextTruncate.AtEnd, Parent = StatusBar
+})
+
+local Pages = {}
+local TabButtons = {}
+local CurrentTab
+
+local function CreatePage(name)
+    local page = New("ScrollingFrame", {
+        Name = name,
+        Size = UDim2.new(1, -24, 1, -88), Position = UDim2.fromOffset(12, 10),
+        BackgroundTransparency = 1, BorderSizePixel = 0,
+        CanvasSize = UDim2.fromOffset(0, 0), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+        ScrollBarThickness = 3, ScrollBarImageColor3 = Theme.Accent,
+        Visible = false, Parent = Content
+    })
+    New("UIListLayout", {Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder, Parent = page})
+    New("UIPadding", {PaddingBottom = UDim.new(0, 10), Parent = page})
+    Pages[name] = page
+    return page
+end
+
+local function SelectTab(name)
+    CurrentTab = name
+    for tabName, page in pairs(Pages) do
+        page.Visible = tabName == name
+    end
+    for tabName, button in pairs(TabButtons) do
+        button.BackgroundColor3 = tabName == name and Theme.Accent or Theme.Surface2
+        button.TextColor3 = tabName == name and Color3.new(1,1,1) or Theme.Muted
+    end
+end
+
+local function AddTab(name, order)
+    local button = New("TextButton", {
+        Size = UDim2.new(1, -16, 0, 38), BackgroundColor3 = Theme.Surface2,
+        Text = name, AutoButtonColor = false, LayoutOrder = order,
+        Font = Enum.Font.GothamSemibold, TextSize = 13, TextColor3 = Theme.Muted,
+        Parent = Sidebar
+    })
+    New("UICorner", {CornerRadius = UDim.new(0, 8), Parent = button})
+    button.MouseButton1Click:Connect(function() SelectTab(name) end)
+    TabButtons[name] = button
+    return CreatePage(name)
+end
+
+local function AddSection(page, text)
+    return New("TextLabel", {
+        Size = UDim2.new(1, -4, 0, 26), BackgroundTransparency = 1,
+        Text = text, Font = Enum.Font.GothamBold, TextSize = 13,
+        TextColor3 = Theme.Accent2, TextXAlignment = Enum.TextXAlignment.Left,
+        Parent = page
+    })
+end
+
+local ToggleRenderers = {}
+
+local function AddToggle(page, label, key, description, callback)
+    local row = New("Frame", {
+        Size = UDim2.new(1, -4, 0, description and 58 or 46),
+        BackgroundColor3 = Theme.Surface, BorderSizePixel = 0, Parent = page
+    })
+    New("UICorner", {CornerRadius = UDim.new(0, 8), Parent = row})
+    New("TextLabel", {
+        Size = UDim2.new(1, -72, 0, 24), Position = UDim2.fromOffset(12, 6),
+        BackgroundTransparency = 1, Text = label, Font = Enum.Font.GothamSemibold,
+        TextSize = 13, TextColor3 = Theme.Text, TextXAlignment = Enum.TextXAlignment.Left,
+        Parent = row
+    })
+    if description then
+        New("TextLabel", {
+            Size = UDim2.new(1, -84, 0, 18), Position = UDim2.fromOffset(12, 30),
+            BackgroundTransparency = 1, Text = description, Font = Enum.Font.Gotham,
+            TextSize = 10, TextColor3 = Theme.Muted, TextXAlignment = Enum.TextXAlignment.Left,
+            TextWrapped = true, Parent = row
+        })
+    end
+
+    local switch = New("TextButton", {
+        Size = UDim2.fromOffset(46, 24), Position = UDim2.new(1, -58, 0.5, -12),
+        BackgroundColor3 = Theme.Surface2, Text = "", AutoButtonColor = false, Parent = row
+    })
+    New("UICorner", {CornerRadius = UDim.new(1, 0), Parent = switch})
+    local knob = New("Frame", {
+        Size = UDim2.fromOffset(18, 18), Position = UDim2.fromOffset(3, 3),
+        BackgroundColor3 = Theme.Text, BorderSizePixel = 0, Parent = switch
+    })
+    New("UICorner", {CornerRadius = UDim.new(1, 0), Parent = knob})
+
+    local function Render()
+        local enabled = Configs[key] == true
+        switch.BackgroundColor3 = enabled and Theme.Accent or Theme.Surface2
+        knob.Position = enabled and UDim2.new(1, -21, 0, 3) or UDim2.fromOffset(3, 3)
+    end
+    ToggleRenderers[key] = Render
+    switch.MouseButton1Click:Connect(function()
+        Configs[key] = not Configs[key]
+        Render()
+        SaveConfigs()
+        if callback then pcall(callback, Configs[key]) end
+    end)
+    Render()
+    return row
+end
+
+local function RoundToStep(value, step)
+    return math.floor(value / step + 0.5) * step
+end
+
+local function AddSlider(page, label, key, minValue, maxValue, step, formatter)
+    local row = New("Frame", {
+        Size = UDim2.new(1, -4, 0, 66), BackgroundColor3 = Theme.Surface,
+        BorderSizePixel = 0, Parent = page
+    })
+    New("UICorner", {CornerRadius = UDim.new(0, 8), Parent = row})
+    New("TextLabel", {
+        Size = UDim2.new(0.7, 0, 0, 22), Position = UDim2.fromOffset(12, 7),
+        BackgroundTransparency = 1, Text = label, Font = Enum.Font.GothamSemibold,
+        TextSize = 13, TextColor3 = Theme.Text, TextXAlignment = Enum.TextXAlignment.Left,
+        Parent = row
+    })
+    local valueLabel = New("TextLabel", {
+        Size = UDim2.new(0.3, -20, 0, 22), Position = UDim2.new(0.7, 8, 0, 7),
+        BackgroundTransparency = 1, Text = "", Font = Enum.Font.GothamBold,
+        TextSize = 12, TextColor3 = Theme.Accent2, TextXAlignment = Enum.TextXAlignment.Right,
+        Parent = row
+    })
+    local bar = New("Frame", {
+        Size = UDim2.new(1, -24, 0, 8), Position = UDim2.fromOffset(12, 43),
+        BackgroundColor3 = Theme.Surface2, BorderSizePixel = 0, Parent = row
+    })
+    New("UICorner", {CornerRadius = UDim.new(1, 0), Parent = bar})
+    local fill = New("Frame", {
+        Size = UDim2.new(0, 0, 1, 0), BackgroundColor3 = Theme.Accent,
+        BorderSizePixel = 0, Parent = bar
+    })
+    New("UICorner", {CornerRadius = UDim.new(1, 0), Parent = fill})
+    local knob = New("Frame", {
+        Size = UDim2.fromOffset(14, 14), AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.new(0, 0, 0.5, 0), BackgroundColor3 = Theme.Text,
+        BorderSizePixel = 0, Parent = bar
+    })
+    New("UICorner", {CornerRadius = UDim.new(1, 0), Parent = knob})
+
+    local sliding = false
+    local function SetFromX(x)
+        local alpha = math.clamp((x - bar.AbsolutePosition.X) / math.max(bar.AbsoluteSize.X, 1), 0, 1)
+        local value = minValue + (maxValue - minValue) * alpha
+        value = RoundToStep(value, step)
+        value = math.clamp(value, minValue, maxValue)
+        Configs[key] = value
+        fill.Size = UDim2.new((value - minValue) / (maxValue - minValue), 0, 1, 0)
+        knob.Position = UDim2.new((value - minValue) / (maxValue - minValue), 0, 0.5, 0)
+        valueLabel.Text = formatter and formatter(value) or tostring(value)
+    end
+    local function Render()
+        local value = math.clamp(tonumber(Configs[key]) or minValue, minValue, maxValue)
+        local alpha = (value - minValue) / (maxValue - minValue)
+        fill.Size = UDim2.new(alpha, 0, 1, 0)
+        knob.Position = UDim2.new(alpha, 0, 0.5, 0)
+        valueLabel.Text = formatter and formatter(value) or tostring(value)
+    end
+    bar.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            sliding = true
+            SetFromX(input.Position.X)
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if sliding and input.UserInputType == Enum.UserInputType.MouseMovement then
+            SetFromX(input.Position.X)
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 and sliding then
+            sliding = false
+            SaveConfigs()
+        end
+    end)
+    Render()
+    return row
+end
+
+local function AddDropdown(page, label, key, options, callback)
+    local row = New("Frame", {
+        Size = UDim2.new(1, -4, 0, 50), BackgroundColor3 = Theme.Surface,
+        BorderSizePixel = 0, ClipsDescendants = false, Parent = page
+    })
+    New("UICorner", {CornerRadius = UDim.new(0, 8), Parent = row})
+    New("TextLabel", {
+        Size = UDim2.new(0.48, 0, 1, 0), Position = UDim2.fromOffset(12, 0),
+        BackgroundTransparency = 1, Text = label, Font = Enum.Font.GothamSemibold,
+        TextSize = 13, TextColor3 = Theme.Text, TextXAlignment = Enum.TextXAlignment.Left,
+        Parent = row
+    })
+    local button = New("TextButton", {
+        Size = UDim2.new(0.45, -12, 0, 32), Position = UDim2.new(0.55, 0, 0.5, -16),
+        BackgroundColor3 = Theme.Surface2, Text = tostring(Configs[key]), AutoButtonColor = false,
+        Font = Enum.Font.GothamSemibold, TextSize = 12, TextColor3 = Theme.Text, Parent = row
+    })
+    New("UICorner", {CornerRadius = UDim.new(0, 7), Parent = button})
+    local index = table.find(options, Configs[key]) or 1
+    button.MouseButton1Click:Connect(function()
+        index = index % #options + 1
+        Configs[key] = options[index]
+        button.Text = tostring(Configs[key])
+        SaveConfigs()
+        if callback then pcall(callback, Configs[key]) end
+    end)
+    return row
+end
+
+local function AddButton(page, label, callback, danger)
+    local button = New("TextButton", {
+        Size = UDim2.new(1, -4, 0, 40), BackgroundColor3 = danger and Theme.Bad or Theme.Surface2,
+        Text = label, AutoButtonColor = false, Font = Enum.Font.GothamBold,
+        TextSize = 13, TextColor3 = Theme.Text, Parent = page
+    })
+    New("UICorner", {CornerRadius = UDim.new(0, 8), Parent = button})
+    button.MouseButton1Click:Connect(function()
+        task.spawn(function()
+            local ok, err = pcall(callback)
+            if not ok then
+                warn("[Tobias/UI] " .. tostring(err))
+            end
+        end)
+    end)
+    return button
+end
+
+local MainPage = AddTab("Principal", 1)
+local CombatPage = AddTab("Combate", 2)
+local ItemsPage = AddTab("Itens", 3)
+local ProgressPage = AddTab("Progressão", 4)
+local SettingsPage = AddTab("Config", 5)
+
+AddSection(MainPage, "FARM")
+AddToggle(MainPage, "Auto Farm Level", "AutoFarmLevel", "Faz quests e elimina os mobs do nível atual.")
+AddToggle(MainPage, "Skip Farm Level", "SkipFarmLevel", "Usa os atalhos de level já existentes no script.")
+AddToggle(MainPage, "Auto World Progress", "AutoWorldProgress", "Executa progressão de Sea quando os requisitos forem alcançados.")
+AddToggle(MainPage, "Auto Factory", "AutoFactory", "Prioriza o Core/Factory quando estiver disponível no Second Sea.")
+AddToggle(MainPage, "Auto Bartilo", "AutoBartilo", "Executa automaticamente a quest do Bartilo.")
+AddDropdown(MainPage, "Time", "Team", {"Pirates", "Marines"}, function(value)
+    pcall(function() CommF_:InvokeServer("SetTeam", value) end)
+end)
+
+AddSection(CombatPage, "COMBATE")
+AddToggle(CombatPage, "Bring Mobs", "BringMobs", "Agrupa um segundo inimigo próximo no alvo principal.")
+AddToggle(CombatPage, "Auto Buso", "AutoBuso", "Ativa Buso automaticamente durante ataques.")
+AddToggle(CombatPage, "Usar skill V", "AutoMeleeSkill", "Usa automaticamente V de estilos suportados quando disponível.")
+AddSlider(CombatPage, "Velocidade do Tween", "TweenSpeed", 100, 1000, 25, function(v) return string.format("%d", v) end)
+AddSlider(CombatPage, "Altura do Farm", "FarmHeight", 5, 60, 1, function(v) return string.format("%d studs", v) end)
+AddSlider(CombatPage, "Distância do Bring", "BringDistance", 50, 600, 10, function(v) return string.format("%d", v) end)
+AddSlider(CombatPage, "Intervalo de Ataque", "AttackDelay", 0.05, 0.50, 0.01, function(v) return string.format("%.2fs", v) end)
+
+AddSection(ItemsPage, "FRUTAS / ITENS")
+AddToggle(ItemsPage, "Pegar frutas do chão", "AutoFruitPickup", "Procura frutas no Workspace e vai até elas.")
+AddToggle(ItemsPage, "Guardar frutas", "AutoStoreFruit", "Guarda automaticamente frutas encontradas quando possível.")
+AddToggle(ItemsPage, "Comprar fruta aleatória", "AutoRandomFruit", "Compra uma fruta aleatória respeitando o intervalo abaixo.")
+AddSlider(ItemsPage, "Intervalo fruta aleatória", "RandomFruitInterval", 10, 600, 5, function(v) return string.format("%ds", v) end)
+AddToggle(ItemsPage, "Auto Saber", "Saber", "Executa a cadeia existente para obter Saber.")
+AddToggle(ItemsPage, "Auto Pole", "Pole", "Tenta obter Pole quando Thunder God estiver disponível.")
+
+AddSection(ProgressPage, "PERSONAGEM")
+AddToggle(ProgressPage, "Progressão de Melee", "AutoMelee", "Compra/evolui estilos de luta suportados pelo script.")
+AddToggle(ProgressPage, "Auto Stats", "AutoStats", "Distribui pontos automaticamente conforme a lógica do script.")
+AddToggle(ProgressPage, "Auto Haki / habilidades", "AutoHaki", "Compra Buso, Geppo, Soru e Ken quando possível.")
+
+AddSection(SettingsPage, "GERAL")
+AddToggle(SettingsPage, "Resgatar códigos ao iniciar", "AutoRedeemCodes", "Executa a lista de códigos automaticamente ao carregar o script.")
+AddToggle(SettingsPage, "Desativar Camera Shake", "DisableCameraShake", "Remove o tremor de câmera quando suportado. Reexecute para reaplicar.")
+
+AddSection(SettingsPage, "DESEMPENHO")
+AddSlider(SettingsPage, "Delay loop principal", "MainLoopDelay", 0.02, 0.50, 0.01, function(v) return string.format("%.2fs", v) end)
+AddSlider(SettingsPage, "Delay utilidades", "UtilityLoopDelay", 0.10, 5.00, 0.10, function(v) return string.format("%.1fs", v) end)
+AddButton(SettingsPage, "Server Hop", function()
+    title.Text = "Server Hop"
+    subtitle.Text = "Procurando servidor..."
+    TeleportServer()
+end)
+AddButton(SettingsPage, "Comprar fruta agora", function()
+    pcall(function() CommF_:InvokeServer("Cousin", "Buy") end)
+    LastRandomFruitAttempt = os.clock()
+end)
+AddButton(SettingsPage, "Salvar configurações", function()
+    SaveConfigs()
+    subtitle.Text = "Configurações salvas"
+end)
+AddButton(SettingsPage, "DESLIGAR TODAS AS AUTOMAÇÕES", function()
+    local keys = {
+        "AutoFarmLevel", "SkipFarmLevel", "AutoWorldProgress", "AutoFactory", "AutoBartilo",
+        "AutoFruitPickup", "AutoStoreFruit", "AutoRandomFruit", "AutoRedeemCodes", "AutoMelee", "AutoStats",
+        "AutoHaki", "AutoBuso", "AutoMeleeSkill", "BringMobs", "Saber", "Pole"
+    }
+    for _, key in ipairs(keys) do
+        Configs[key] = false
+        if ToggleRenderers[key] then ToggleRenderers[key]() end
+    end
+    SaveConfigs()
+    title.Text = "Automações desligadas"
+    subtitle.Text = "Todos os toggles automáticos foram desativados"
+end, true)
+
+SelectTab("Principal")
+
+UserInputService.InputBegan:Connect(function(input, processed)
+    if processed then return end
+    if input.KeyCode == Enum.KeyCode.RightShift then
+        MainWindow.Visible = not MainWindow.Visible
+    end
+end)
+
+local TimeL = New("TextLabel", {
+    Size = UDim2.new(1, -16, 0, 24), LayoutOrder = 99,
+    BackgroundTransparency = 1, Text = "", Font = Enum.Font.Gotham,
+    TextSize = 10, TextColor3 = Theme.Muted, TextXAlignment = Enum.TextXAlignment.Center,
+    Parent = Sidebar
+})
+task.spawn(function()
+    while ScreenGui.Parent do
+        local t = os.date("*t")
+        TimeL.Text = string.format("%02d:%02d:%02d  |  Lv. %s", t.hour, t.min, t.sec,
+            tostring(LocalPlayer:FindFirstChild("Data") and LocalPlayer.Data:FindFirstChild("Level") and LocalPlayer.Data.Level.Value or "?"))
+        task.wait(1)
+    end
+end)
+
 local LevelQuest
 local Monster
 local NameQuest
 local NameCheckQuest
 local CFrameQ
 local CFrameMon
-if not identifyexecutor or identifyexecutor() ~= "Solara" then
+if Configs.DisableCameraShake and (not identifyexecutor or identifyexecutor() ~= "Solara") then
     pcall(function()
         require(ReplicatedStorage.Util.CameraShaker):Stop()
     end)
@@ -924,6 +1381,7 @@ local function CheckQuest()
     end
 end
 task.spawn(function()
+    if not Configs.AutoRedeemCodes then return end
 	local codes = {"BANEXPLOIT", "NOMOREHACKS", "WildDares", "BossBuild", "GetPranked", "EARN_FRUITS", "Sub2UncleKizaru", "FIGHT4FRUIT", "kittgaming", "TRIPLEABUSE", "Sub2CaptainMaui", "Sub2Fer999", "Enyu_is_Pro", "Magicbus", "JCWK", "Starcodeheo", "Bluxxy", "SUB2GAMERROBOT_EXP1", "Sub2NoobMaster123", "Sub2Daigrock", "Axiore", "TantaiGaming", "StrawHatMaine", "Sub2OfficialNoobie", "TheGreatAce", "SEATROLLIN", "24NOADMIN", "ADMIN_TROLL", "NEWTROLL", "SECRET_ADMIN", "staffbattle", "NOEXPLOIT", "NOOB2ADMIN", "CODESLIDE", "fruitconcepts"}
 	for _, v in ipairs(codes) do
 		ReplicatedStorage.Remotes.Redeem:InvokeServer(v)
@@ -982,17 +1440,21 @@ local function SmartMoveAndAttack(mainMob, QuestTitle, Quest, IsCheckQuest, Cust
 
     repeat
         task.wait(0.03)
-        if not IsAliveMob(mainMob) then
+        if not Configs.AutoFarmLevel or not IsAliveMob(mainMob) then
             break
         end
 
         title.Text = "Auto Farming Level | Kill " .. mainMob.Name
 
-        if not IsAliveMob(secondMob) then
-            secondMob = GetNearestMob(mainMob, 350)
+        if Configs.BringMobs then
+            if not IsAliveMob(secondMob) then
+                secondMob = GetNearestMob(mainMob, tonumber(Configs.BringDistance) or 350)
+            end
+        else
+            secondMob = nil
         end
 
-        if IsAliveMob(secondMob) then
+        if Configs.BringMobs and IsAliveMob(secondMob) then
             local secondHRP = secondMob.HumanoidRootPart
             secondHRP.CFrame = hrp.CFrame
             secondMob.Humanoid.JumpPower = 0
@@ -1019,7 +1481,7 @@ local function SmartMoveAndAttack(mainMob, QuestTitle, Quest, IsCheckQuest, Cust
         local distance = (myHRP.Position - hrp.Position).Magnitude
         if distance > 150 then
             if not tween or tween.PlaybackState ~= Enum.PlaybackState.Playing then
-                tween = Tween(hrp.CFrame * CFrame.new(0, 30, 0), 350)
+                tween = Tween(hrp.CFrame * CFrame.new(0, tonumber(Configs.FarmHeight) or 30, 0), Configs.TweenSpeed)
             end
         else
             if tween then
@@ -1035,7 +1497,7 @@ local function SmartMoveAndAttack(mainMob, QuestTitle, Quest, IsCheckQuest, Cust
             end
 
             myHRP.CFrame = hrp.CFrame
-                * CFrame.new(0, 30, 0)
+                * CFrame.new(0, tonumber(Configs.FarmHeight) or 30, 0)
                 * CFrame.Angles(0, math.rad(AttackRotation), 0)
 
             if secondMob then
@@ -1065,7 +1527,7 @@ end
 
 local function KaitunWorld1(Quest,QuestTitle,Level)
 	CheckInv()
-	if Level >= 700 then
+	if Level >= 700 and Configs.AutoWorldProgress then
 		title.Text = "Doing Second Sea Puzzle"
 		local canTravel = CommF_:InvokeServer("DressrosaQuestProgress", "Dressrosa")
 		local dressrosaProgress = CommF_:InvokeServer("DressrosaQuestProgress")
@@ -1272,7 +1734,7 @@ local function KaitunWorld2(Quest,QuestTitle,Level)
 	if Level >= 850 then
 		bartiloProgress = CommF_:InvokeServer("BartiloQuestProgress", "Bartilo")
 	end
-	if workspace.Enemies:FindFirstChild("Core") or ReplicatedStorage:FindFirstChild("Core") then
+	if Configs.AutoFactory and (workspace.Enemies:FindFirstChild("Core") or ReplicatedStorage:FindFirstChild("Core")) then
 		if workspace.Enemies:FindFirstChild("Core") then
 			for _,v in pairs(workspace.Enemies:GetChildren()) do
 				if v.Name == "Core" and v:FindFirstChild("HumanoidRootPart") and v:FindFirstChild("Humanoid") then
@@ -1610,44 +2072,48 @@ local function HandleFruits()
     local hrp = GetHRP()
     if not hrp then return end
 
-    for _, fruit in ipairs(workspace:GetChildren()) do
-        if fruit:IsA("Model") and string.find(fruit.Name:lower(), "fruit", 1, true) then
-            local handle = fruit:FindFirstChild("Handle")
-            local originalName = fruit:GetAttribute("OriginalName")
+    if Configs.AutoFruitPickup then
+        for _, fruit in ipairs(workspace:GetChildren()) do
+            if fruit:IsA("Model") and string.find(fruit.Name:lower(), "fruit", 1, true) then
+                local handle = fruit:FindFirstChild("Handle")
+                local originalName = fruit:GetAttribute("OriginalName")
 
-            if handle and originalName and not inventoryNames[originalName] then
-                title.Text = "Get " .. fruit.Name
-                local distance = (handle.Position - hrp.Position).Magnitude
+                if handle and originalName and not inventoryNames[originalName] then
+                    title.Text = "Get " .. fruit.Name
+                    local distance = (handle.Position - hrp.Position).Magnitude
 
-                if distance > 150 then
-                    local tween = Tween(handle.CFrame, 350)
-                    if tween then
-                        tween.Completed:Wait()
-                        task.wait(0.15)
+                    if distance > 150 then
+                        local tween = Tween(handle.CFrame, Configs.TweenSpeed)
+                        if tween then
+                            tween.Completed:Wait()
+                            task.wait(0.15)
+                        end
+                    else
+                        hrp.CFrame = handle.CFrame
+                        task.wait(0.1)
                     end
-                else
-                    hrp.CFrame = handle.CFrame
-                    task.wait(0.1)
-                end
 
-                hrp = GetHRP()
-                if not hrp then return end
+                    hrp = GetHRP()
+                    if not hrp then return end
+                end
             end
         end
     end
 
-    local character = LocalPlayer.Character
-    if character then
-        for _, tool in ipairs(character:GetChildren()) do
+    if Configs.AutoStoreFruit then
+        local character = LocalPlayer.Character
+        if character then
+            for _, tool in ipairs(character:GetChildren()) do
+                if tool:IsA("Tool") and string.find(tool.Name:lower(), "fruit", 1, true) then
+                    StoreFruitTool(tool, inventoryNames)
+                end
+            end
+        end
+
+        for _, tool in ipairs(LocalPlayer.Backpack:GetChildren()) do
             if tool:IsA("Tool") and string.find(tool.Name:lower(), "fruit", 1, true) then
                 StoreFruitTool(tool, inventoryNames)
             end
-        end
-    end
-
-    for _, tool in ipairs(LocalPlayer.Backpack:GetChildren()) do
-        if tool:IsA("Tool") and string.find(tool.Name:lower(), "fruit", 1, true) then
-            StoreFruitTool(tool, inventoryNames)
         end
     end
 end
@@ -1777,7 +2243,22 @@ end
 
 local function RunMainCycle()
     DieWait()
-    HandleFruits()
+
+    if Configs.AutoFruitPickup or Configs.AutoStoreFruit then
+        HandleFruits()
+    end
+
+    if Configs.AutoMelee then
+        ProgressMelee()
+    end
+
+    if not Configs.AutoFarmLevel then
+        if not Configs.AutoMelee and not Configs.AutoFruitPickup and not Configs.AutoStoreFruit then
+            title.Text = "Idling"
+            subtitle.Text = "Ative uma automação no menu"
+        end
+        return
+    end
 
     CheckQuest()
 
@@ -1791,7 +2272,6 @@ local function RunMainCycle()
     end
 
     local CurLevel = LocalPlayer.Data.Level.Value
-    ProgressMelee()
 
     if World1 then
         KaitunWorld1(Quest, QuestTitle, CurLevel)
@@ -1804,7 +2284,7 @@ local function RunMainCycle()
 end
 
 task.spawn(function()
-    while task.wait(Configs.MainLoopDelay) do
+    while task.wait(math.max(tonumber(Configs.MainLoopDelay) or 0.05, 0.02)) do
         local ok, err = pcall(RunMainCycle)
         if not ok then
             subtitle.Text = "Recovering from runtime error"
@@ -1814,7 +2294,7 @@ task.spawn(function()
     end
 end)
 
-local LastRandomFruitAttempt = 0
+LastRandomFruitAttempt = LastRandomFruitAttempt or 0
 
 local function SpendStatPoints()
     local data = LocalPlayer.Data
@@ -1854,32 +2334,37 @@ local function RunUtilityCycle()
     local character = LocalPlayer.Character
     if not character then return end
 
-    SpendStatPoints()
-
-    if not CollectionService:HasTag(character, "Buso") and LocalPlayer.Data.Beli.Value >= 25000 then
-        CommF_:InvokeServer("BuyHaki", "Buso")
-    end
-    if not CollectionService:HasTag(character, "Geppo") and LocalPlayer.Data.Beli.Value >= 10000 then
-        CommF_:InvokeServer("BuyHaki", "Geppo")
-    end
-    if not CollectionService:HasTag(character, "Soru") and LocalPlayer.Data.Beli.Value >= 100000 then
-        CommF_:InvokeServer("BuyHaki", "Soru")
-    end
-    if not CollectionService:HasTag(character, "Ken") and World1 and LocalPlayer.Data.Beli.Value >= 750000 then
-        CommF_:InvokeServer("KenTalk", "Buy")
+    if Configs.AutoStats then
+        SpendStatPoints()
     end
 
-    if Configs.AutoRandomFruit and os.clock() - LastRandomFruitAttempt >= Configs.RandomFruitInterval then
+    if Configs.AutoHaki then
+        if not CollectionService:HasTag(character, "Buso") and LocalPlayer.Data.Beli.Value >= 25000 then
+            CommF_:InvokeServer("BuyHaki", "Buso")
+        end
+        if not CollectionService:HasTag(character, "Geppo") and LocalPlayer.Data.Beli.Value >= 10000 then
+            CommF_:InvokeServer("BuyHaki", "Geppo")
+        end
+        if not CollectionService:HasTag(character, "Soru") and LocalPlayer.Data.Beli.Value >= 100000 then
+            CommF_:InvokeServer("BuyHaki", "Soru")
+        end
+        if not CollectionService:HasTag(character, "Ken") and World1 and LocalPlayer.Data.Beli.Value >= 750000 then
+            CommF_:InvokeServer("KenTalk", "Buy")
+        end
+    end
+
+    if Configs.AutoRandomFruit and os.clock() - LastRandomFruitAttempt >= (tonumber(Configs.RandomFruitInterval) or 60) then
         LastRandomFruitAttempt = os.clock()
         CommF_:InvokeServer("Cousin", "Buy")
     end
 end
 
 task.spawn(function()
-    while task.wait(Configs.UtilityLoopDelay) do
+    while task.wait(math.max(tonumber(Configs.UtilityLoopDelay) or 1, 0.1)) do
         local ok, err = pcall(RunUtilityCycle)
         if not ok then
             warn("[Kaitun/Utility] " .. tostring(err))
         end
     end
 end)
+
