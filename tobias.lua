@@ -1,4 +1,4 @@
--- Tobias Hub v2
+-- Tobias Hub v2.3
 -- Menu: RightShift | Configs salvas quando o executor suporta writefile/readfile
 
 getgenv().Configs = getgenv().Configs or {}
@@ -40,6 +40,8 @@ local Defaults = {
     AutoBuso = true,
     AutoMeleeSkill = true,
     BringMobs = true,
+    CombatMoveMode = "Hybrid",
+    CombatSnapDistance = 300,
     TweenSpeed = 350,
     FarmHeight = 30,
     BringDistance = 350,
@@ -49,7 +51,10 @@ local Defaults = {
     RandomFruitInterval = 60,
     DebugEnabled = true,
     VerboseDebug = false,
-    DebugMaxLogs = 80
+    DebugMaxLogs = 80,
+    QuestStartCooldown = 0.75,
+    QuestConfirmTimeout = 1.50,
+    InventoryCacheTTL = 1.00
 }
 
 for key, value in pairs(Defaults) do
@@ -101,10 +106,13 @@ local DebugState = {
     LastQuest = "NONE",
     LastTween = "NONE",
     LastTweenDistance = 0,
+    LastMoveMode = "NONE",
+    LastMoveDistance = 0,
     CurrentState = "BOOTING",
     FunctionCalls = {},
     FunctionLastDuration = {},
     RemoteCalls = {},
+    RemoteLastResult = {},
     Logs = {},
     ActiveTests = {},
 }
@@ -207,6 +215,7 @@ local function DebugInvoke(...)
     end
 
     DebugState.LastRemoteResult = DebugSerialize(packed[2])
+    DebugState.RemoteLastResult[command] = DebugState.LastRemoteResult
     return table.unpack(packed, 2, packed.n)
 end
 
@@ -629,21 +638,32 @@ end
 
 local InventoryCache = {}
 local InventoryCacheAt = 0
-local InventoryCacheTTL = 0.5
+local InventoryLastAttemptAt = 0
 
 local function GetInventory(forceRefresh)
     local __dbgStart = DebugFunction("GetInventory","force=" .. tostring(forceRefresh))
-    if not forceRefresh and os.clock() - InventoryCacheAt <= InventoryCacheTTL then
+    local now = os.clock()
+    local ttl = math.max(tonumber(Configs.InventoryCacheTTL) or 1.0, 0.25)
+
+    if not forceRefresh and InventoryCacheAt > 0 and (now - InventoryCacheAt) <= ttl then
         return InventoryCache
     end
 
+    -- If the server temporarily returns nil/non-table, don't hammer getInventory every frame.
+    if not forceRefresh and InventoryLastAttemptAt > 0 and (now - InventoryLastAttemptAt) <= ttl then
+        return InventoryCache
+    end
+
+    InventoryLastAttemptAt = now
     local ok, result = pcall(function()
         return DebugInvoke("getInventory")
     end)
 
     if ok and type(result) == "table" then
         InventoryCache = result
-        InventoryCacheAt = os.clock()
+        InventoryCacheAt = now
+    elseif ok then
+        DebugLog("CACHE", "getInventory retornou " .. typeof(result) .. "; mantendo cache anterior")
     end
 
     return InventoryCache
@@ -651,6 +671,7 @@ end
 
 local function InvalidateInventoryCache()
     InventoryCacheAt = 0
+    InventoryLastAttemptAt = 0
 end
 
 local function CheckInv(inv)
@@ -1091,6 +1112,8 @@ AddSection(CombatPage, "COMBATE")
 AddToggle(CombatPage, "Bring Mobs", "BringMobs", "Agrupa um segundo inimigo próximo no alvo principal.")
 AddToggle(CombatPage, "Auto Buso", "AutoBuso", "Ativa Buso automaticamente durante ataques.")
 AddToggle(CombatPage, "Usar skill V", "AutoMeleeSkill", "Usa automaticamente V de estilos suportados quando disponível.")
+AddDropdown(CombatPage, "Movimento de combate", "CombatMoveMode", {"Hybrid", "Tween", "Teleport"})
+AddSlider(CombatPage, "Distância para TP no Hybrid", "CombatSnapDistance", 50, 800, 25, function(v) return string.format("%d studs", v) end)
 AddSlider(CombatPage, "Velocidade do Tween", "TweenSpeed", 100, 1000, 25, function(v) return string.format("%d", v) end)
 AddSlider(CombatPage, "Altura do Farm", "FarmHeight", 5, 60, 1, function(v) return string.format("%d studs", v) end)
 AddSlider(CombatPage, "Distância do Bring", "BringDistance", 50, 600, 10, function(v) return string.format("%d", v) end)
@@ -1116,6 +1139,9 @@ AddToggle(SettingsPage, "Desativar Camera Shake", "DisableCameraShake", "Remove 
 AddSection(SettingsPage, "DESEMPENHO")
 AddSlider(SettingsPage, "Delay loop principal", "MainLoopDelay", 0.02, 0.50, 0.01, function(v) return string.format("%.2fs", v) end)
 AddSlider(SettingsPage, "Delay utilidades", "UtilityLoopDelay", 0.10, 5.00, 0.10, function(v) return string.format("%.1fs", v) end)
+AddSlider(SettingsPage, "Cooldown para iniciar quest", "QuestStartCooldown", 0.25, 3.00, 0.05, function(v) return string.format("%.2fs", v) end)
+AddSlider(SettingsPage, "Tempo para confirmar quest", "QuestConfirmTimeout", 0.50, 4.00, 0.10, function(v) return string.format("%.1fs", v) end)
+AddSlider(SettingsPage, "Cache de inventário", "InventoryCacheTTL", 0.25, 5.00, 0.25, function(v) return string.format("%.2fs", v) end)
 AddButton(SettingsPage, "Server Hop", function()
     title.Text = "Server Hop"
     subtitle.Text = "Procurando servidor..."
@@ -1227,9 +1253,12 @@ AddButton(DebugPage, "COPIAR RELATÓRIO", function()
         "LastRemote: " .. tostring(DebugState.LastRemote),
         "RemoteArgs: " .. tostring(DebugState.LastRemoteArgs),
         "RemoteResult: " .. tostring(DebugState.LastRemoteResult),
+        "StartQuestResult: " .. tostring(DebugState.RemoteLastResult.StartQuest or "-"),
+        "GetInventoryResult: " .. tostring(DebugState.RemoteLastResult.getInventory or "-"),
         "Target: " .. tostring(DebugState.LastTarget) .. " " .. tostring(DebugState.LastTargetHP),
         "Quest: " .. tostring(DebugState.LastQuest),
         "Tween: " .. tostring(DebugState.LastTween),
+        "Movement: " .. tostring(DebugState.LastMoveMode) .. " | Distance=" .. string.format("%.0f", DebugState.LastMoveDistance or 0),
         "\n-- TOP FUNCTIONS --\n" .. DebugTopFunctions(15),
         "\n-- TOP REMOTES --\n" .. DebugTopRemotes(15),
         "\n-- LOG --\n" .. table.concat(DebugState.Logs, "\n")
@@ -1265,9 +1294,12 @@ task.spawn(function()
                 "QUEST       : " .. tostring(DebugState.LastQuest),
                 "TARGET      : " .. tostring(DebugState.LastTarget) .. " | HP " .. tostring(DebugState.LastTargetHP),
                 "TWEEN       : " .. tostring(IsTweening) .. " | Dist " .. string.format("%.0f", DebugState.LastTweenDistance or 0),
+                "MOVEMENT    : " .. tostring(DebugState.LastMoveMode) .. " | TargetDist " .. string.format("%.0f", DebugState.LastMoveDistance or 0),
                 "REMOTE      : " .. tostring(DebugState.LastRemote) .. " | Total " .. tostring(DebugState.RemoteCount),
                 "ARGS        : " .. tostring(DebugState.LastRemoteArgs),
                 "RETURN      : " .. tostring(DebugState.LastRemoteResult),
+                "START QUEST : " .. tostring(DebugState.RemoteLastResult.StartQuest or "-"),
+                "INV RESULT  : " .. tostring(DebugState.RemoteLastResult.getInventory or "-"),
             }, "\n")
             DebugFunctions.Text = DebugTopFunctions(9)
             DebugRemotes.Text = DebugTopRemotes(9)
@@ -1732,6 +1764,42 @@ local function GetNearestMob(originMob, maxDistance)
     return nearest
 end
 
+local function MoveToCombatTarget(myHRP, targetHRP, currentTween)
+    if not myHRP or not targetHRP then
+        return currentTween, false
+    end
+
+    local farmHeight = tonumber(Configs.FarmHeight) or 30
+    local desired = targetHRP.CFrame
+        * CFrame.new(0, farmHeight, 0)
+        * CFrame.Angles(0, math.rad(AttackRotation), 0)
+
+    local distance = (myHRP.Position - targetHRP.Position).Magnitude
+    local mode = tostring(Configs.CombatMoveMode or "Hybrid")
+    local snapDistance = math.max(tonumber(Configs.CombatSnapDistance) or 300, 25)
+
+    DebugState.LastMoveMode = mode
+    DebugState.LastMoveDistance = distance
+
+    local shouldTeleport = mode == "Teleport" or (mode == "Hybrid" and distance <= snapDistance)
+
+    if shouldTeleport then
+        if currentTween then
+            pcall(function() currentTween:Cancel() end)
+            currentTween = nil
+        end
+        DebugSetState("COMBAT_TELEPORT")
+        myHRP.CFrame = desired
+        return nil, true
+    end
+
+    DebugSetState("COMBAT_TWEEN")
+    if not currentTween or currentTween.PlaybackState ~= Enum.PlaybackState.Playing then
+        currentTween = Tween(desired, tonumber(Configs.TweenSpeed) or 350)
+    end
+    return currentTween, false
+end
+
 local function SmartMoveAndAttack(mainMob, QuestTitle, Quest, IsCheckQuest, CustomName)
     local __dbgStart = DebugFunction("SmartMoveAndAttack",mainMob and mainMob.Name or "nil")
     DebugSetState("SMART_COMBAT")
@@ -1761,6 +1829,7 @@ local function SmartMoveAndAttack(mainMob, QuestTitle, Quest, IsCheckQuest, Cust
 
     local secondMob
     local tween
+    local inAttackPosition = false
 
     repeat
         task.wait(0.03)
@@ -1803,26 +1872,25 @@ local function SmartMoveAndAttack(mainMob, QuestTitle, Quest, IsCheckQuest, Cust
         end
 
         local distance = (myHRP.Position - hrp.Position).Magnitude
-        if distance > 150 then
-            if not tween or tween.PlaybackState ~= Enum.PlaybackState.Playing then
-                tween = Tween(hrp.CFrame * CFrame.new(0, tonumber(Configs.FarmHeight) or 30, 0), Configs.TweenSpeed)
-            end
-        else
-            if tween then
-                tween:Cancel()
-                tween = nil
-            end
 
+        if os.clock() - LastRotate >= 0.25 then
+            AttackRotation = (AttackRotation + 180) % 360
+            LastRotate = os.clock()
+        end
+
+        tween, inAttackPosition = MoveToCombatTarget(myHRP, hrp, tween)
+
+        -- Em modo Tween puro, só ataca quando chegar perto. Hybrid/Teleport atacam assim que o TP é aplicado.
+        local attackRange = math.max(tonumber(Configs.CombatSnapDistance) or 300, 75)
+        if inAttackPosition or distance <= math.min(attackRange, 175) then
             EquipWeapon("Melee")
 
-            if os.clock() - LastRotate >= 0.25 then
-                AttackRotation = (AttackRotation + 180) % 360
-                LastRotate = os.clock()
+            -- Mantém o personagem acompanhando o alvo durante o combate.
+            if tostring(Configs.CombatMoveMode or "Hybrid") ~= "Tween" then
+                myHRP.CFrame = hrp.CFrame
+                    * CFrame.new(0, tonumber(Configs.FarmHeight) or 30, 0)
+                    * CFrame.Angles(0, math.rad(AttackRotation), 0)
             end
-
-            myHRP.CFrame = hrp.CFrame
-                * CFrame.new(0, tonumber(Configs.FarmHeight) or 30, 0)
-                * CFrame.Angles(0, math.rad(AttackRotation), 0)
 
             if secondMob then
                 Attack({mainMob, secondMob})
@@ -1847,6 +1915,58 @@ local function SmartMoveAndAttack(mainMob, QuestTitle, Quest, IsCheckQuest, Cust
     end
 
     return humanoid.Health <= 0
+end
+
+local QuestRequestState = {
+    Key = "",
+    LastRequestAt = 0,
+    PendingUntil = 0,
+    LastConfirmedKey = "",
+}
+
+local function ResetQuestRequestState()
+    QuestRequestState.Key = ""
+    QuestRequestState.LastRequestAt = 0
+    QuestRequestState.PendingUntil = 0
+end
+
+local function EnsureQuestStarted(Quest, questName, questLevel)
+    local key = tostring(questName) .. ":" .. tostring(questLevel)
+    local now = os.clock()
+    local cooldown = math.max(tonumber(Configs.QuestStartCooldown) or 0.75, 0.25)
+    local confirmTimeout = math.max(tonumber(Configs.QuestConfirmTimeout) or 1.50, cooldown)
+
+    if Quest and Quest.Visible then
+        if QuestRequestState.LastConfirmedKey ~= key then
+            QuestRequestState.LastConfirmedKey = key
+            DebugLog("QUEST", "Quest confirmada: " .. key)
+        end
+        ResetQuestRequestState()
+        return true
+    end
+
+    if QuestRequestState.Key ~= key then
+        QuestRequestState.Key = key
+        QuestRequestState.LastRequestAt = 0
+        QuestRequestState.PendingUntil = 0
+    end
+
+    if QuestRequestState.PendingUntil > now then
+        DebugSetState("QUEST_REQUEST_PENDING")
+        return false
+    end
+
+    if QuestRequestState.LastRequestAt > 0 and (now - QuestRequestState.LastRequestAt) < cooldown then
+        DebugSetState("QUEST_REQUEST_COOLDOWN")
+        return false
+    end
+
+    DebugSetState("REQUESTING_QUEST")
+    QuestRequestState.LastRequestAt = now
+    QuestRequestState.PendingUntil = now + confirmTimeout
+    local result = DebugInvoke("StartQuest", questName, questLevel)
+    DebugLog("QUEST", "StartQuest " .. key .. " => " .. DebugSerialize(result))
+    return false
 end
 
 local function KaitunWorld1(Quest,QuestTitle,Level)
@@ -2019,17 +2139,22 @@ local function KaitunWorld1(Quest,QuestTitle,Level)
 		end
     elseif not Quest.Visible then
 		title.Text = "Auto Farming Level | Get Quest"
-		if (CFrameQ.Position - LocalPlayer.Character.HumanoidRootPart.Position).Magnitude > 150 then
-			t2 = Tween(CFrameQ,350)
-		elseif (CFrameQ.Position - LocalPlayer.Character.HumanoidRootPart.Position).Magnitude <= 150 then
+		local hrp = GetHRP()
+		if not hrp then return end
+		local distanceToQuest = (CFrameQ.Position - hrp.Position).Magnitude
+		if distanceToQuest > 150 then
+			DebugSetState("MOVING_TO_QUEST")
+			t2 = Tween(CFrameQ, tonumber(Configs.TweenSpeed) or 350)
+		else
 			if t2 then
 				t2:Cancel()
+				t2 = nil
 			end
-			LocalPlayer.Character.HumanoidRootPart.CFrame = CFrameQ
-			DebugInvoke("StartQuest",NameQuest,LevelQuest)
-			DebugInvoke("SetSpawnPoint")
+			hrp.CFrame = CFrameQ
+			EnsureQuestStarted(Quest, NameQuest, LevelQuest)
 		end
 	elseif Quest.Visible then
+		ResetQuestRequestState()
 		if workspace.Enemies:FindFirstChild(Monster) then
 			for _,v in pairs(workspace.Enemies:GetChildren()) do
 				if v.Name == Monster and v:FindFirstChild("HumanoidRootPart") and v:FindFirstChild("Humanoid") and v.Humanoid.Health > 0 then
@@ -2161,17 +2286,22 @@ local function KaitunWorld2(Quest,QuestTitle,Level)
         end
     elseif not Quest.Visible then
 		title.Text = "Auto Farming Level | Get Quest"
-		if (CFrameQ.Position - LocalPlayer.Character.HumanoidRootPart.Position).Magnitude > 150 then
-			t2 = Tween(CFrameQ,350)
-		elseif (CFrameQ.Position - LocalPlayer.Character.HumanoidRootPart.Position).Magnitude <= 150 then
+		local hrp = GetHRP()
+		if not hrp then return end
+		local distanceToQuest = (CFrameQ.Position - hrp.Position).Magnitude
+		if distanceToQuest > 150 then
+			DebugSetState("MOVING_TO_QUEST")
+			t2 = Tween(CFrameQ, tonumber(Configs.TweenSpeed) or 350)
+		else
 			if t2 then
 				t2:Cancel()
+				t2 = nil
 			end
-			LocalPlayer.Character.HumanoidRootPart.CFrame = CFrameQ
-			DebugInvoke("StartQuest",NameQuest,LevelQuest)
-			DebugInvoke("SetSpawnPoint")
+			hrp.CFrame = CFrameQ
+			EnsureQuestStarted(Quest, NameQuest, LevelQuest)
 		end
 	elseif Quest.Visible then
+		ResetQuestRequestState()
 		if workspace.Enemies:FindFirstChild(Monster) then
 			for _,v in pairs(workspace.Enemies:GetChildren()) do
 				if v.Name == Monster and v:FindFirstChild("HumanoidRootPart") and v:FindFirstChild("Humanoid") and v.Humanoid.Health > 0 then
@@ -2705,3 +2835,4 @@ task.spawn(function()
         end
     end
 end)
+
