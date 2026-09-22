@@ -1,4 +1,4 @@
--- Tobias Hub v2.3
+-- Tobias Hub v2.4 BLACKBOX DEBUG
 -- Menu: RightShift | Configs salvas quando o executor suporta writefile/readfile
 
 getgenv().Configs = getgenv().Configs or {}
@@ -51,7 +51,8 @@ local Defaults = {
     RandomFruitInterval = 60,
     DebugEnabled = true,
     VerboseDebug = false,
-    DebugMaxLogs = 80,
+    DebugMaxLogs = 500,
+    DebugTraceEnabled = true,
     QuestStartCooldown = 0.75,
     QuestConfirmTimeout = 1.50,
     InventoryCacheTTL = 1.00
@@ -83,6 +84,7 @@ local CollectionService = game:GetService("CollectionService")
 local HttpService = game:GetService("HttpService")
 local VirtualInputManager = game:GetService("VirtualInputManager")
 local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
 local LocalPlayer = Players.LocalPlayer
 local CommF_ = ReplicatedStorage.Remotes.CommF_
 
@@ -115,6 +117,30 @@ local DebugState = {
     RemoteLastResult = {},
     Logs = {},
     ActiveTests = {},
+    ActionSeq = 0,
+    ActionCount = 0,
+    ActionCounts = {},
+    ActionHistory = {},
+    CurrentAction = "BOOT",
+    LastAction = "BOOT",
+    LastActionDetails = "-",
+    LastActionAt = 0,
+    LastActionTimes = {},
+    LastQuestSelection = "",
+    LastQuestGuiVisible = nil,
+    LastQuestGuiText = "",
+    AttackAttempts = 0,
+    AttackSuccess = 0,
+    RegisterAttackCount = 0,
+    RegisterHitCount = 0,
+    CombatEntries = 0,
+    CombatExits = 0,
+    MovementActions = 0,
+    EquipAttempts = 0,
+    EquipSuccess = 0,
+    QuestRequests = 0,
+    QuestConfirmed = 0,
+    TargetHpEvents = 0,
 }
 
 local function DebugSerialize(value, depth)
@@ -150,13 +176,55 @@ local function DebugLog(category, message, force)
     if not Configs.DebugEnabled and not force then return end
     local entry = string.format("[%s][%s] %s", os.date("%H:%M:%S"), tostring(category), tostring(message))
     table.insert(DebugState.Logs, 1, entry)
-    local maxLogs = math.clamp(tonumber(Configs.DebugMaxLogs) or 80, 20, 300)
+    local maxLogs = math.clamp(tonumber(Configs.DebugMaxLogs) or 500, 50, 1000)
     while #DebugState.Logs > maxLogs do
         table.remove(DebugState.Logs)
     end
     if Configs.VerboseDebug or category == "ERROR" then
         warn("[TobiasDebug] " .. entry)
     end
+end
+
+local function DebugAction(action, details, minInterval, force)
+    if not Configs.DebugTraceEnabled and not force then return end
+    action = tostring(action or "UNKNOWN")
+    details = details ~= nil and tostring(details) or "-"
+    local now = os.clock()
+    local key = action .. "|" .. details
+    local interval = tonumber(minInterval) or 0
+    local last = DebugState.LastActionTimes[key] or 0
+    if interval > 0 and (now - last) < interval then
+        return
+    end
+    DebugState.LastActionTimes[key] = now
+    DebugState.ActionSeq += 1
+    DebugState.ActionCount += 1
+    DebugState.ActionCounts[action] = (DebugState.ActionCounts[action] or 0) + 1
+    DebugState.CurrentAction = action
+    DebugState.LastAction = action
+    DebugState.LastActionDetails = details
+    DebugState.LastActionAt = now
+    local entry = string.format("#%05d +%.3fs %-22s | %s", DebugState.ActionSeq, now - DebugState.StartedAt, action, details)
+    table.insert(DebugState.ActionHistory, 1, entry)
+    local maxActions = math.clamp(tonumber(Configs.DebugMaxLogs) or 500, 50, 1000)
+    while #DebugState.ActionHistory > maxActions do
+        table.remove(DebugState.ActionHistory)
+    end
+    DebugLog("ACTION", entry, force)
+end
+
+local function DebugTopActions(limit)
+    local list = {}
+    for name, count in pairs(DebugState.ActionCounts) do
+        table.insert(list, {name = name, count = count})
+    end
+    table.sort(list, function(a, b) return a.count > b.count end)
+    local out = {}
+    for i = 1, math.min(limit or 12, #list) do
+        local item = list[i]
+        table.insert(out, string.format("%s: %d", item.name, item.count))
+    end
+    return table.concat(out, "\n")
 end
 
 local function DebugFunction(name, details)
@@ -203,6 +271,7 @@ local function DebugInvoke(...)
     end
     DebugState.LastRemoteArgs = table.concat(argText, " | ")
     DebugLog("REMOTE", DebugState.LastRemoteArgs)
+    DebugAction("REMOTE_CALL", DebugState.LastRemoteArgs)
 
     local packed = table.pack(pcall(function()
         return CommF_:InvokeServer(table.unpack(args, 1, #args))
@@ -216,6 +285,7 @@ local function DebugInvoke(...)
 
     DebugState.LastRemoteResult = DebugSerialize(packed[2])
     DebugState.RemoteLastResult[command] = DebugState.LastRemoteResult
+    DebugAction("REMOTE_RETURN", command .. " => " .. DebugState.LastRemoteResult)
     return table.unpack(packed, 2, packed.n)
 end
 
@@ -369,6 +439,8 @@ local function Tween(target, speed)
 
     local distance = (hrp.Position - target.Position).Magnitude
     DebugState.LastTweenDistance = distance
+    DebugState.MovementActions += 1
+    DebugAction("TWEEN_START", string.format("dist=%.1f speed=%.1f target=%s", distance, speed, DebugSerialize(target)), 0.10)
     local tween = TweenService:Create(
         hrp,
         TweenInfo.new(distance / speed, Enum.EasingStyle.Linear),
@@ -378,8 +450,9 @@ local function Tween(target, speed)
     IsTweening = true
     tween:Play()
     task.spawn(function()
-        tween.Completed:Wait()
+        local playback = tween.Completed:Wait()
         IsTweening = false
+        DebugAction("TWEEN_END", "state=" .. tostring(playback) .. " target=" .. DebugSerialize(target))
     end)
 
     return tween
@@ -468,6 +541,7 @@ local function TryUseMeleeV()
         local cooldown = vSkill and vSkill:FindFirstChild("Cooldown")
 
         if skill and level and tonumber(level.Value) >= info.Mastery and cooldown and cooldown.AbsoluteSize.X <= 0.1 then
+            DebugAction("SKILL_CAST", info.Name .. " | V | mastery=" .. tostring(level.Value))
             VirtualInputManager:SendKeyEvent(true, "V", false, game)
             VirtualInputManager:SendKeyEvent(false, "V", false, game)
             return
@@ -478,6 +552,8 @@ end
 local function Attack(target)
     local __dbgStart = DebugFunction("Attack",DebugSerialize(target))
     DebugSetState("ATTACKING")
+    DebugState.AttackAttempts += 1
+    DebugAction("ATTACK_ATTEMPT", DebugSerialize(target))
     if os.clock() - LastAttackTime < math.max(tonumber(Configs.AttackDelay) or 0.2, 0.03) then
         return false
     end
@@ -504,6 +580,7 @@ local function Attack(target)
     end
 
     if #targets == 0 then
+        DebugAction("ATTACK_ABORT", "no valid targets")
         return false
     end
 
@@ -535,6 +612,8 @@ local function Attack(target)
         return false
     end
 
+    DebugState.RegisterAttackCount += 1
+    DebugAction("REGISTER_ATTACK", "targets=" .. tostring(#targets))
     ReplicatedStorage.Modules.Net["RE/RegisterAttack"]:FireServer(0)
 
     if #targets >= 2 then
@@ -558,7 +637,12 @@ local function Attack(target)
                 nil,
                 v106
             )
+            DebugAction("COMBAT_REMOTE_FIRE", "multi target | " .. first.Name .. " + " .. second.Name)
             ReplicatedStorage.Modules.Net["RE/RegisterHit"]:FireServer(firstHead, hitData, nil, v106)
+            DebugState.RegisterHitCount += 1
+            DebugState.AttackSuccess += 1
+            DebugAction("REGISTER_HIT", "multi target | " .. first.Name .. " + " .. second.Name)
+            DebugAction("ATTACK_SENT", "success=true")
             return true
         end
     end
@@ -571,7 +655,12 @@ local function Attack(target)
         hitData,
         v106
     )
+    DebugAction("COMBAT_REMOTE_FIRE", "single target | " .. first.Name)
     ReplicatedStorage.Modules.Net["RE/RegisterHit"]:FireServer(firstHead, hitData, v106)
+    DebugState.RegisterHitCount += 1
+    DebugState.AttackSuccess += 1
+    DebugAction("REGISTER_HIT", "single target | " .. first.Name)
+    DebugAction("ATTACK_SENT", "success=true")
     return true
 end
 
@@ -581,11 +670,13 @@ local function DieWait()
     local humanoid = character:FindFirstChildOfClass("Humanoid") or character:WaitForChild("Humanoid")
 
     if humanoid.Health <= 0 or not character:FindFirstChild("Head") then
+        DebugAction("PLAYER_DEAD_WAIT", "waiting respawn", 0, true)
         repeat
             task.wait(0.25)
             character = LocalPlayer.Character
             humanoid = character and character:FindFirstChildOfClass("Humanoid")
         until character and humanoid and humanoid.Health > 0 and character:FindFirstChild("Head")
+        DebugAction("PLAYER_RESPAWNED", "hp=" .. tostring(humanoid.Health), 0, true)
     end
 
     if not character:FindFirstChild("HasBuso") then
@@ -597,26 +688,38 @@ end
 
 local function EquipWeapon(toolType)
     local __dbgStart = DebugFunction("EquipWeapon",tostring(toolType))
+    DebugState.EquipAttempts += 1
+    DebugAction("EQUIP_ATTEMPT", tostring(toolType), 0.10)
     local character = LocalPlayer.Character
     local backpack = LocalPlayer:FindFirstChild("Backpack")
-    if not character or not backpack then return nil end
+    if not character or not backpack then
+        DebugAction("EQUIP_FAIL", "character/backpack missing")
+        return nil
+    end
 
     for _, tool in ipairs(character:GetChildren()) do
         if tool:IsA("Tool") and tool.ToolTip == toolType then
+            DebugAction("EQUIP_ALREADY", tool.Name, 0.25)
             return tool
         end
     end
 
     local humanoid = character:FindFirstChildOfClass("Humanoid")
-    if not humanoid then return nil end
+    if not humanoid then
+        DebugAction("EQUIP_FAIL", "humanoid missing")
+        return nil
+    end
 
     for _, tool in ipairs(backpack:GetChildren()) do
         if tool:IsA("Tool") and tool.ToolTip == toolType then
             humanoid:EquipTool(tool)
+            DebugState.EquipSuccess += 1
+            DebugAction("EQUIP_SUCCESS", tool.Name .. " type=" .. tostring(toolType))
             return tool
         end
     end
 
+    DebugAction("EQUIP_FAIL", "no tool for type=" .. tostring(toolType), 0.50)
     return nil
 end
 
@@ -958,6 +1061,7 @@ local function AddToggle(page, label, key, description, callback)
     ToggleRenderers[key] = Render
     switch.MouseButton1Click:Connect(function()
         Configs[key] = not Configs[key]
+        DebugAction("CONFIG_TOGGLE", tostring(key) .. "=" .. tostring(Configs[key]), 0, true)
         Render()
         SaveConfigs()
         if callback then pcall(callback, Configs[key]) end
@@ -1037,6 +1141,7 @@ local function AddSlider(page, label, key, minValue, maxValue, step, formatter)
     UserInputService.InputEnded:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 and sliding then
             sliding = false
+            DebugAction("CONFIG_SLIDER", tostring(key) .. "=" .. tostring(Configs[key]), 0, true)
             SaveConfigs()
         end
     end)
@@ -1066,6 +1171,7 @@ local function AddDropdown(page, label, key, options, callback)
     button.MouseButton1Click:Connect(function()
         index = index % #options + 1
         Configs[key] = options[index]
+        DebugAction("CONFIG_DROPDOWN", tostring(key) .. "=" .. tostring(Configs[key]), 0, true)
         button.Text = tostring(Configs[key])
         SaveConfigs()
         if callback then pcall(callback, Configs[key]) end
@@ -1081,6 +1187,7 @@ local function AddButton(page, label, callback, danger)
     })
     New("UICorner", {CornerRadius = UDim.new(0, 8), Parent = button})
     button.MouseButton1Click:Connect(function()
+        DebugAction("UI_BUTTON", tostring(label), 0, true)
         task.spawn(function()
             local ok, err = pcall(callback)
             if not ok then
@@ -1174,16 +1281,37 @@ end, true)
 -- ======================== DEBUG TAB ========================
 AddSection(DebugPage, "Diagnóstico em tempo real")
 AddToggle(DebugPage, "Debug ativo", "DebugEnabled", "Registra funções, estados, remotes e erros em tempo real.")
+AddToggle(DebugPage, "Rastreamento TOTAL", "DebugTraceEnabled", "Registra cada ação importante: quest, alvo, movimento, equipamento, ataque, hit, HP e remotes.")
 AddToggle(DebugPage, "Verbose no console", "VerboseDebug", "Também imprime eventos detalhados no console do executor.")
 
 local DebugSummary = New("TextLabel", {
-    Size = UDim2.new(1, -4, 0, 178), BackgroundColor3 = Theme.Surface, BorderSizePixel = 0,
+    Size = UDim2.new(1, -4, 0, 245), BackgroundColor3 = Theme.Surface, BorderSizePixel = 0,
     Text = "Carregando diagnóstico...", Font = Enum.Font.Code, TextSize = 11,
     TextColor3 = Theme.Text, TextXAlignment = Enum.TextXAlignment.Left,
     TextYAlignment = Enum.TextYAlignment.Top, TextWrapped = false, Parent = DebugPage
 })
 New("UICorner", {CornerRadius = UDim.new(0, 8), Parent = DebugSummary})
 New("UIPadding", {PaddingTop = UDim.new(0, 9), PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10), Parent = DebugSummary})
+
+AddSection(DebugPage, "Linha do tempo de ações")
+local DebugActions = New("TextLabel", {
+    Size = UDim2.new(1, -4, 0, 330), BackgroundColor3 = Theme.Surface, BorderSizePixel = 0,
+    Text = "Nenhuma ação ainda", Font = Enum.Font.Code, TextSize = 10,
+    TextColor3 = Theme.Text, TextXAlignment = Enum.TextXAlignment.Left,
+    TextYAlignment = Enum.TextYAlignment.Top, TextWrapped = true, Parent = DebugPage
+})
+New("UICorner", {CornerRadius = UDim.new(0, 8), Parent = DebugActions})
+New("UIPadding", {PaddingTop = UDim.new(0, 8), PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10), Parent = DebugActions})
+
+AddSection(DebugPage, "Ações mais registradas")
+local DebugActionStats = New("TextLabel", {
+    Size = UDim2.new(1, -4, 0, 155), BackgroundColor3 = Theme.Surface, BorderSizePixel = 0,
+    Text = "Nenhuma ação ainda", Font = Enum.Font.Code, TextSize = 11,
+    TextColor3 = Theme.Muted, TextXAlignment = Enum.TextXAlignment.Left,
+    TextYAlignment = Enum.TextYAlignment.Top, Parent = DebugPage
+})
+New("UICorner", {CornerRadius = UDim.new(0, 8), Parent = DebugActionStats})
+New("UIPadding", {PaddingTop = UDim.new(0, 8), PaddingLeft = UDim.new(0, 10), Parent = DebugActionStats})
 
 AddSection(DebugPage, "Funções mais chamadas")
 local DebugFunctions = New("TextLabel", {
@@ -1240,14 +1368,34 @@ AddButton(DebugPage, "TESTAR TWEEN CURTO", function()
 end)
 AddButton(DebugPage, "LIMPAR LOG", function()
     table.clear(DebugState.Logs)
+    table.clear(DebugState.ActionHistory)
+    table.clear(DebugState.ActionCounts)
+    DebugState.ActionSeq = 0
+    DebugState.ActionCount = 0
     DebugState.LastError = "NONE"
     DebugState.ErrorCount = 0
     DebugLog("DEBUG", "Log limpo", true)
+end)
+AddButton(DebugPage, "COPIAR SÓ LINHA DO TEMPO", function()
+    local timeline = table.concat({
+        "=== TOBIAS ACTION TIMELINE ===",
+        "State: " .. tostring(DebugState.CurrentState),
+        "Config: AutoFarm=" .. tostring(Configs.AutoFarmLevel) .. " SkipFarm=" .. tostring(Configs.SkipFarmLevel) .. " Move=" .. tostring(Configs.CombatMoveMode),
+        "",
+        table.concat(DebugState.ActionHistory, "\n")
+    }, "\n")
+    if setclipboard then
+        setclipboard(timeline)
+        DebugLog("DEBUG", "Linha do tempo copiada", true)
+    else
+        warn(timeline)
+    end
 end)
 AddButton(DebugPage, "COPIAR RELATÓRIO", function()
     local report = table.concat({
         "=== TOBIAS DEBUG REPORT ===",
         "State: " .. tostring(DebugState.CurrentState),
+        "CurrentAction: #" .. tostring(DebugState.ActionSeq) .. " " .. tostring(DebugState.CurrentAction) .. " | " .. tostring(DebugState.LastActionDetails),
         "CurrentFunction: " .. tostring(DebugState.CurrentFunction),
         "LastError: " .. tostring(DebugState.LastError),
         "LastRemote: " .. tostring(DebugState.LastRemote),
@@ -1259,6 +1407,10 @@ AddButton(DebugPage, "COPIAR RELATÓRIO", function()
         "Quest: " .. tostring(DebugState.LastQuest),
         "Tween: " .. tostring(DebugState.LastTween),
         "Movement: " .. tostring(DebugState.LastMoveMode) .. " | Distance=" .. string.format("%.0f", DebugState.LastMoveDistance or 0),
+        string.format("Config: AutoFarm=%s SkipFarm=%s MoveMode=%s Bring=%s TweenSpeed=%s SnapDist=%s FarmHeight=%s AttackDelay=%s", tostring(Configs.AutoFarmLevel), tostring(Configs.SkipFarmLevel), tostring(Configs.CombatMoveMode), tostring(Configs.BringMobs), tostring(Configs.TweenSpeed), tostring(Configs.CombatSnapDistance), tostring(Configs.FarmHeight), tostring(Configs.AttackDelay)),
+        string.format("Counters: actions=%d attacks=%d/%d hits=%d combat=%d/%d moves=%d equips=%d/%d quests=%d/%d hpEvents=%d", DebugState.ActionCount, DebugState.AttackSuccess, DebugState.AttackAttempts, DebugState.RegisterHitCount, DebugState.CombatEntries, DebugState.CombatExits, DebugState.MovementActions, DebugState.EquipSuccess, DebugState.EquipAttempts, DebugState.QuestConfirmed, DebugState.QuestRequests, DebugState.TargetHpEvents),
+        "\n-- TOP ACTIONS --\n" .. DebugTopActions(20),
+        "\n-- ACTION TIMELINE (NEWEST FIRST) --\n" .. table.concat(DebugState.ActionHistory, "\n"),
         "\n-- TOP FUNCTIONS --\n" .. DebugTopFunctions(15),
         "\n-- TOP REMOTES --\n" .. DebugTopRemotes(15),
         "\n-- LOG --\n" .. table.concat(DebugState.Logs, "\n")
@@ -1286,6 +1438,8 @@ task.spawn(function()
 
             DebugSummary.Text = table.concat({
                 "STATE       : " .. tostring(DebugState.CurrentState),
+                "ACTION      : #" .. tostring(DebugState.ActionSeq) .. " " .. tostring(DebugState.CurrentAction),
+                "DETAIL      : " .. tostring(DebugState.LastActionDetails),
                 "FUNCTION    : " .. tostring(DebugState.CurrentFunction),
                 "ERRORS      : " .. tostring(DebugState.ErrorCount) .. " | " .. tostring(DebugState.LastError),
                 "WORLD/LEVEL : " .. tostring(placeid == 2753915549 and 1 or placeid == 79091703265657 and 2 or placeid == 7449423635 and 3 or 0) .. " / " .. tostring(levelValue and levelValue.Value or "?"),
@@ -1295,12 +1449,18 @@ task.spawn(function()
                 "TARGET      : " .. tostring(DebugState.LastTarget) .. " | HP " .. tostring(DebugState.LastTargetHP),
                 "TWEEN       : " .. tostring(IsTweening) .. " | Dist " .. string.format("%.0f", DebugState.LastTweenDistance or 0),
                 "MOVEMENT    : " .. tostring(DebugState.LastMoveMode) .. " | TargetDist " .. string.format("%.0f", DebugState.LastMoveDistance or 0),
+                "CONFIG      : AutoFarm=" .. tostring(Configs.AutoFarmLevel) .. " Skip=" .. tostring(Configs.SkipFarmLevel) .. " Move=" .. tostring(Configs.CombatMoveMode),
                 "REMOTE      : " .. tostring(DebugState.LastRemote) .. " | Total " .. tostring(DebugState.RemoteCount),
                 "ARGS        : " .. tostring(DebugState.LastRemoteArgs),
                 "RETURN      : " .. tostring(DebugState.LastRemoteResult),
                 "START QUEST : " .. tostring(DebugState.RemoteLastResult.StartQuest or "-"),
                 "INV RESULT  : " .. tostring(DebugState.RemoteLastResult.getInventory or "-"),
+                string.format("COUNTERS    : atk %d/%d | hit %d | combat %d/%d | move %d | equip %d/%d | quest %d/%d", DebugState.AttackSuccess, DebugState.AttackAttempts, DebugState.RegisterHitCount, DebugState.CombatEntries, DebugState.CombatExits, DebugState.MovementActions, DebugState.EquipSuccess, DebugState.EquipAttempts, DebugState.QuestConfirmed, DebugState.QuestRequests),
             }, "\n")
+            local actionLines = {}
+            for i = 1, math.min(18, #DebugState.ActionHistory) do actionLines[i] = DebugState.ActionHistory[i] end
+            DebugActions.Text = #actionLines > 0 and table.concat(actionLines, "\n") or "Nenhuma ação ainda"
+            DebugActionStats.Text = DebugTopActions(12)
             DebugFunctions.Text = DebugTopFunctions(9)
             DebugRemotes.Text = DebugTopRemotes(9)
             local visibleLogs = {}
@@ -1311,12 +1471,126 @@ task.spawn(function()
     end
 end)
 
+
+-- BLACKBOX EVENT OBSERVERS: monitoram alterações reais do cliente, não apenas chamadas do Tobias.
+task.spawn(function()
+    local function bindCharacter(character)
+        DebugAction("CHARACTER_ADDED", character:GetFullName(), 0, true)
+        local humanoid = character:WaitForChild("Humanoid", 10)
+        local hrp = character:WaitForChild("HumanoidRootPart", 10)
+        if humanoid then
+            DebugAction("HUMANOID_READY", string.format("hp=%.0f/%.0f", humanoid.Health, humanoid.MaxHealth), 0, true)
+            humanoid.Died:Connect(function() DebugAction("PLAYER_DIED_EVENT", "Humanoid.Died", 0, true) end)
+            local lastHp = humanoid.Health
+            humanoid.HealthChanged:Connect(function(hp)
+                if math.abs(hp - lastHp) >= 1 then
+                    DebugAction("PLAYER_HP_CHANGED", string.format("%.0f -> %.0f", lastHp, hp), 0.10)
+                    lastHp = hp
+                end
+            end)
+        else
+            DebugAction("HUMANOID_MISSING", "timeout", 0, true)
+        end
+        if hrp then DebugAction("HRP_READY", DebugSerialize(hrp.Position), 0, true) end
+        character.ChildAdded:Connect(function(child)
+            if child:IsA("Tool") then DebugAction("TOOL_EQUIPPED_EVENT", child.Name, 0, true) end
+        end)
+        character.ChildRemoved:Connect(function(child)
+            if child:IsA("Tool") then DebugAction("TOOL_UNEQUIPPED_EVENT", child.Name, 0, true) end
+        end)
+    end
+    if LocalPlayer.Character then task.spawn(bindCharacter, LocalPlayer.Character) end
+    LocalPlayer.CharacterAdded:Connect(bindCharacter)
+end)
+
+task.spawn(function()
+    local playerGui = LocalPlayer:WaitForChild("PlayerGui")
+    local main = playerGui:WaitForChild("Main", 20)
+    local quest = main and main:WaitForChild("Quest", 20)
+    if not quest then
+        DebugAction("QUEST_GUI_MISSING", "Main.Quest not found", 0, true)
+        return
+    end
+    local function getQuestText()
+        local container = quest:FindFirstChild("Container")
+        local qtc = container and container:FindFirstChild("QuestTitle")
+        local titleObj = qtc and qtc:FindFirstChild("Title")
+        return titleObj and titleObj.Text or "<no title>"
+    end
+    local function reportQuest(reason)
+        local text = getQuestText()
+        DebugState.LastQuestGuiVisible = quest.Visible
+        DebugState.LastQuestGuiText = text
+        DebugAction("QUEST_GUI_EVENT", reason .. " | visible=" .. tostring(quest.Visible) .. " | text=" .. text, 0, true)
+    end
+    reportQuest("BOUND")
+    quest:GetPropertyChangedSignal("Visible"):Connect(function() reportQuest("VISIBLE_CHANGED") end)
+    task.spawn(function()
+        local container = quest:WaitForChild("Container", 20)
+        local qtc = container and container:WaitForChild("QuestTitle", 20)
+        local titleObj = qtc and qtc:WaitForChild("Title", 20)
+        if titleObj then
+            titleObj:GetPropertyChangedSignal("Text"):Connect(function() reportQuest("TEXT_CHANGED") end)
+        end
+    end)
+end)
+
+
+-- Observa spawn/despawn de inimigos e movimento real do personagem.
+task.spawn(function()
+    local enemies = workspace:WaitForChild("Enemies", 20)
+    if enemies then
+        enemies.ChildAdded:Connect(function(mob)
+            task.defer(function()
+                local hum = mob:FindFirstChild("Humanoid")
+                local root = mob:FindFirstChild("HumanoidRootPart")
+                DebugAction("ENEMY_SPAWN", tostring(mob.Name) .. " | hp=" .. tostring(hum and hum.Health or "?") .. " | pos=" .. tostring(root and DebugSerialize(root.Position) or "?"), 0, true)
+            end)
+        end)
+        enemies.ChildRemoved:Connect(function(mob)
+            DebugAction("ENEMY_DESPAWN", tostring(mob.Name), 0, true)
+        end)
+    else
+        DebugAction("ENEMIES_FOLDER_MISSING", "workspace.Enemies timeout", 0, true)
+    end
+end)
+
+task.spawn(function()
+    local lastPos
+    local lastSample = 0
+    while ScreenGui.Parent do
+        if Configs.DebugTraceEnabled then
+            local hrp = GetHRP()
+            if hrp then
+                local pos = hrp.Position
+                if lastPos then
+                    local moved = (pos - lastPos).Magnitude
+                    if moved >= 8 and (os.clock() - lastSample) >= 0.20 then
+                        DebugAction("PLAYER_MOVED", string.format("delta=%.1f pos=%s", moved, DebugSerialize(pos)), 0.15)
+                        lastSample = os.clock()
+                        lastPos = pos
+                    elseif moved >= 2 then
+                        lastPos = pos
+                    end
+                else
+                    lastPos = pos
+                    DebugAction("PLAYER_POSITION_INIT", DebugSerialize(pos), 0, true)
+                end
+            else
+                lastPos = nil
+            end
+        end
+        task.wait(0.10)
+    end
+end)
+
 SelectTab("Principal")
 
 UserInputService.InputBegan:Connect(function(input, processed)
     if processed then return end
     if input.KeyCode == Enum.KeyCode.RightShift then
         MainWindow.Visible = not MainWindow.Visible
+        DebugAction("MENU_VISIBILITY", tostring(MainWindow.Visible), 0, true)
     end
 end)
 
@@ -1730,6 +2004,10 @@ local function CheckQuest()
 
     end
     DebugState.LastQuest = string.format("%s | LvQuest %s | Mob %s", tostring(NameQuest), tostring(LevelQuest), tostring(Monster))
+    if DebugState.LastQuestSelection ~= DebugState.LastQuest then
+        DebugState.LastQuestSelection = DebugState.LastQuest
+        DebugAction("QUEST_SELECTED", DebugState.LastQuest)
+    end
 end
 DebugCheckQuestRunner = CheckQuest
 task.spawn(function()
@@ -1766,6 +2044,7 @@ end
 
 local function MoveToCombatTarget(myHRP, targetHRP, currentTween)
     if not myHRP or not targetHRP then
+        DebugAction("MOVE_ABORT", "missing playerHRP/targetHRP")
         return currentTween, false
     end
 
@@ -1787,15 +2066,26 @@ local function MoveToCombatTarget(myHRP, targetHRP, currentTween)
         if currentTween then
             pcall(function() currentTween:Cancel() end)
             currentTween = nil
+            DebugAction("TWEEN_CANCEL", "combat teleport requested")
         end
         DebugSetState("COMBAT_TELEPORT")
+        DebugState.MovementActions += 1
+        local before = myHRP.Position
+        DebugAction("TELEPORT_ATTEMPT", string.format("mode=%s dist=%.1f from=%s to=%s", mode, distance, DebugSerialize(before), DebugSerialize(desired.Position)), 0.15)
         myHRP.CFrame = desired
-        return nil, true
+        task.wait()
+        local after = myHRP.Position
+        local errorDist = (after - desired.Position).Magnitude
+        DebugAction("TELEPORT_RESULT", string.format("after=%s error=%.1f", DebugSerialize(after), errorDist), 0.15)
+        return nil, errorDist <= math.max(15, farmHeight + 10)
     end
 
     DebugSetState("COMBAT_TWEEN")
     if not currentTween or currentTween.PlaybackState ~= Enum.PlaybackState.Playing then
+        DebugAction("COMBAT_MOVE_TWEEN", string.format("mode=%s dist=%.1f", mode, distance), 0.15)
         currentTween = Tween(desired, tonumber(Configs.TweenSpeed) or 350)
+    else
+        DebugAction("COMBAT_TWEEN_ACTIVE", string.format("dist=%.1f", distance), 0.50)
     end
     return currentTween, false
 end
@@ -1804,16 +2094,28 @@ local function SmartMoveAndAttack(mainMob, QuestTitle, Quest, IsCheckQuest, Cust
     local __dbgStart = DebugFunction("SmartMoveAndAttack",mainMob and mainMob.Name or "nil")
     DebugSetState("SMART_COMBAT")
     DebugState.LastTarget = mainMob and mainMob.Name or "NONE"
+    DebugState.CombatEntries += 1
+    DebugAction("COMBAT_ENTER", (mainMob and mainMob.Name or "nil") .. " | questCheck=" .. tostring(IsCheckQuest))
     if IsCheckQuest == nil then IsCheckQuest = true end
     CustomName = CustomName or NameCheckQuest
 
     pcall(sethiddenproperty, LocalPlayer, "SimulationRadius", math.huge)
     if not IsAliveMob(mainMob) then
+        DebugAction("COMBAT_ABORT", "target invalid/dead")
+        DebugState.CombatExits += 1
         return false
     end
 
     local humanoid = mainMob.Humanoid
     local hrp = mainMob.HumanoidRootPart
+    DebugAction("TARGET_LOCK", string.format("%s hp=%.0f/%.0f pos=%s", mainMob.Name, humanoid.Health, humanoid.MaxHealth, DebugSerialize(hrp.Position)))
+    local lastTargetHp = humanoid.Health
+    local hpConn = humanoid.HealthChanged:Connect(function(newHp)
+        DebugState.TargetHpEvents += 1
+        DebugState.LastTargetHP = string.format("%.0f/%.0f", newHp, humanoid.MaxHealth)
+        DebugAction("TARGET_HP_CHANGED", string.format("%s %.0f -> %.0f", mainMob.Name, lastTargetHp, newHp))
+        lastTargetHp = newHp
+    end)
     humanoid.JumpPower = 0
     humanoid.WalkSpeed = 0
     hrp.CanCollide = false
@@ -1842,6 +2144,9 @@ local function SmartMoveAndAttack(mainMob, QuestTitle, Quest, IsCheckQuest, Cust
         if Configs.BringMobs then
             if not IsAliveMob(secondMob) then
                 secondMob = GetNearestMob(mainMob, tonumber(Configs.BringDistance) or 350)
+                if secondMob then
+                    DebugAction("SECOND_TARGET_FOUND", secondMob.Name)
+                end
             end
         else
             secondMob = nil
@@ -1850,6 +2155,7 @@ local function SmartMoveAndAttack(mainMob, QuestTitle, Quest, IsCheckQuest, Cust
         if Configs.BringMobs and IsAliveMob(secondMob) then
             local secondHRP = secondMob.HumanoidRootPart
             secondHRP.CFrame = hrp.CFrame
+            DebugAction("BRING_MOB", secondMob.Name .. " -> " .. mainMob.Name, 0.50)
             secondMob.Humanoid.JumpPower = 0
             secondMob.Humanoid.WalkSpeed = 0
             secondHRP.CanCollide = false
@@ -1868,6 +2174,7 @@ local function SmartMoveAndAttack(mainMob, QuestTitle, Quest, IsCheckQuest, Cust
 
         local myHRP = GetHRP()
         if not myHRP then
+            DebugAction("COMBAT_EXIT_REASON", "player HRP missing")
             break
         end
 
@@ -1883,6 +2190,7 @@ local function SmartMoveAndAttack(mainMob, QuestTitle, Quest, IsCheckQuest, Cust
         -- Em modo Tween puro, só ataca quando chegar perto. Hybrid/Teleport atacam assim que o TP é aplicado.
         local attackRange = math.max(tonumber(Configs.CombatSnapDistance) or 300, 75)
         if inAttackPosition or distance <= math.min(attackRange, 175) then
+            DebugAction("ATTACK_RANGE_ENTER", string.format("dist=%.1f inPosition=%s", distance, tostring(inAttackPosition)), 0.20)
             EquipWeapon("Melee")
 
             -- Mantém o personagem acompanhando o alvo durante o combate.
@@ -1906,13 +2214,18 @@ local function SmartMoveAndAttack(mainMob, QuestTitle, Quest, IsCheckQuest, Cust
         end
 
         if questMismatch or (IsCheckQuest and Quest and not Quest.Visible) then
+            DebugAction("COMBAT_EXIT_REASON", questMismatch and "quest mismatch" or "quest GUI hidden")
             break
         end
     until humanoid.Health <= 0
 
     if tween then
         tween:Cancel()
+        DebugAction("TWEEN_CANCEL", "combat ended")
     end
+    if hpConn then hpConn:Disconnect() end
+    DebugState.CombatExits += 1
+    DebugAction("COMBAT_EXIT", string.format("target=%s dead=%s hp=%.0f", mainMob.Name, tostring(humanoid.Health <= 0), humanoid.Health))
 
     return humanoid.Health <= 0
 end
@@ -1940,6 +2253,8 @@ local function EnsureQuestStarted(Quest, questName, questLevel)
         if QuestRequestState.LastConfirmedKey ~= key then
             QuestRequestState.LastConfirmedKey = key
             DebugLog("QUEST", "Quest confirmada: " .. key)
+            DebugState.QuestConfirmed += 1
+            DebugAction("QUEST_CONFIRMED", key .. " | guiVisible=true")
         end
         ResetQuestRequestState()
         return true
@@ -1953,6 +2268,7 @@ local function EnsureQuestStarted(Quest, questName, questLevel)
 
     if QuestRequestState.PendingUntil > now then
         DebugSetState("QUEST_REQUEST_PENDING")
+        DebugAction("QUEST_WAIT_CONFIRM", key .. string.format(" | %.2fs left", QuestRequestState.PendingUntil - now), 0.50)
         return false
     end
 
@@ -1962,10 +2278,13 @@ local function EnsureQuestStarted(Quest, questName, questLevel)
     end
 
     DebugSetState("REQUESTING_QUEST")
+    DebugState.QuestRequests += 1
+    DebugAction("QUEST_REQUEST", key)
     QuestRequestState.LastRequestAt = now
     QuestRequestState.PendingUntil = now + confirmTimeout
     local result = DebugInvoke("StartQuest", questName, questLevel)
     DebugLog("QUEST", "StartQuest " .. key .. " => " .. DebugSerialize(result))
+    DebugAction("QUEST_REQUEST_RESULT", key .. " => " .. DebugSerialize(result))
     return false
 end
 
@@ -2098,6 +2417,7 @@ local function KaitunWorld1(Quest,QuestTitle,Level)
 			DebugInvoke("SetSpawnPoint")
 		end
 	elseif getgenv().Configs.SkipFarmLevel and (Level >= 0 and Level <= 24) then
+        DebugAction("BRANCH_SKIP_FARM", "Level 0-24 | Dark Master", 0.50)
 		if workspace.Enemies:FindFirstChild("Dark Master") then
 			for _,v in pairs(workspace.Enemies:GetChildren()) do
 				if LocalPlayer.Data.Level.Value >= 25 then
@@ -2118,6 +2438,7 @@ local function KaitunWorld1(Quest,QuestTitle,Level)
 			end 
 		end
 	elseif getgenv().Configs.SkipFarmLevel and (Level >= 25 and Level <= 59) then
+        DebugAction("BRANCH_SKIP_FARM", "Level 25-59 | Royal Squad", 0.50)
 		if workspace.Enemies:FindFirstChild("Royal Squad") then
 			for _,v in pairs(workspace.Enemies:GetChildren()) do
 				if LocalPlayer.Data.Level.Value >= 60 then
@@ -2138,42 +2459,68 @@ local function KaitunWorld1(Quest,QuestTitle,Level)
 			end 
 		end
     elseif not Quest.Visible then
+        DebugAction("BRANCH_NORMAL_QUEST", "quest not visible | " .. tostring(NameQuest), 0.50)
 		title.Text = "Auto Farming Level | Get Quest"
 		local hrp = GetHRP()
-		if not hrp then return end
+		if not hrp then
+            DebugAction("QUEST_FLOW_ABORT", "player HRP missing")
+            return
+        end
 		local distanceToQuest = (CFrameQ.Position - hrp.Position).Magnitude
 		if distanceToQuest > 150 then
 			DebugSetState("MOVING_TO_QUEST")
+            DebugAction("MOVE_TO_QUEST", string.format("quest=%s dist=%.1f target=%s", tostring(NameQuest), distanceToQuest, DebugSerialize(CFrameQ)), 0.40)
 			t2 = Tween(CFrameQ, tonumber(Configs.TweenSpeed) or 350)
 		else
 			if t2 then
 				t2:Cancel()
 				t2 = nil
+                DebugAction("TWEEN_CANCEL", "arrived at quest NPC")
 			end
+            DebugAction("QUEST_NPC_SNAP", "from=" .. DebugSerialize(hrp.Position) .. " to=" .. DebugSerialize(CFrameQ.Position))
 			hrp.CFrame = CFrameQ
+            task.wait()
+            DebugAction("QUEST_NPC_SNAP_RESULT", "actual=" .. DebugSerialize(hrp.Position))
 			EnsureQuestStarted(Quest, NameQuest, LevelQuest)
 		end
 	elseif Quest.Visible then
+        DebugAction("BRANCH_QUEST_ACTIVE", "title=" .. tostring(QuestTitle.Text), 0.50)
 		ResetQuestRequestState()
 		if workspace.Enemies:FindFirstChild(Monster) then
+            DebugAction("TARGET_CONTAINER_FOUND", tostring(Monster), 0.30)
 			for _,v in pairs(workspace.Enemies:GetChildren()) do
 				if v.Name == Monster and v:FindFirstChild("HumanoidRootPart") and v:FindFirstChild("Humanoid") and v.Humanoid.Health > 0 then
-					if string.find(QuestTitle.Text, NameCheckQuest) then
+                    local playerHrp = GetHRP()
+                    local targetDist = playerHrp and (playerHrp.Position - v.HumanoidRootPart.Position).Magnitude or -1
+                    DebugAction("TARGET_FOUND", string.format("%s hp=%.0f dist=%.1f pos=%s", v.Name, v.Humanoid.Health, targetDist, DebugSerialize(v.HumanoidRootPart.Position)), 0.20)
+					if string.find(QuestTitle.Text, NameCheckQuest, 1, true) then
+                        DebugAction("QUEST_MATCH", "title=" .. tostring(QuestTitle.Text) .. " expected=" .. tostring(NameCheckQuest), 0.30)
                         SmartMoveAndAttack(v, QuestTitle, Quest)
 					else
+                        DebugAction("QUEST_MISMATCH", "title=" .. tostring(QuestTitle.Text) .. " expected=" .. tostring(NameCheckQuest))
 						DebugInvoke("AbandonQuest")
 					end
 				end
 			end
 		else
 			title.Text = "Auto Farming Level | Wait For " .. Monster
-			if (CFrameMon.Position - LocalPlayer.Character.HumanoidRootPart.Position).Magnitude > 150 then
+            DebugAction("TARGET_NOT_FOUND", tostring(Monster) .. " | spawn=" .. DebugSerialize(CFrameMon), 0.60)
+            local playerHrp = GetHRP()
+            if not playerHrp then
+                DebugAction("TARGET_WAIT_ABORT", "player HRP missing")
+                return
+            end
+            local spawnDist = (CFrameMon.Position - playerHrp.Position).Magnitude
+			if spawnDist > 150 then
+                DebugAction("MOVE_TO_MOB_SPAWN", string.format("mob=%s dist=%.1f", tostring(Monster), spawnDist), 0.40)
 				t0 = Tween(CFrameMon,350)
-			elseif (CFrameMon.Position - LocalPlayer.Character.HumanoidRootPart.Position).Magnitude <= 150 then
+			else
 				if t0 then
 					t0:Cancel()
+                    DebugAction("TWEEN_CANCEL", "arrived at mob spawn")
 				end
-				LocalPlayer.Character.HumanoidRootPart.CFrame = CFrameMon
+                DebugAction("MOB_SPAWN_SNAP", "to=" .. DebugSerialize(CFrameMon.Position), 0.50)
+				playerHrp.CFrame = CFrameMon
 			end
 		end
 	end
@@ -2285,42 +2632,68 @@ local function KaitunWorld2(Quest,QuestTitle,Level)
             -- end
         end
     elseif not Quest.Visible then
+        DebugAction("BRANCH_NORMAL_QUEST", "quest not visible | " .. tostring(NameQuest), 0.50)
 		title.Text = "Auto Farming Level | Get Quest"
 		local hrp = GetHRP()
-		if not hrp then return end
+		if not hrp then
+            DebugAction("QUEST_FLOW_ABORT", "player HRP missing")
+            return
+        end
 		local distanceToQuest = (CFrameQ.Position - hrp.Position).Magnitude
 		if distanceToQuest > 150 then
 			DebugSetState("MOVING_TO_QUEST")
+            DebugAction("MOVE_TO_QUEST", string.format("quest=%s dist=%.1f target=%s", tostring(NameQuest), distanceToQuest, DebugSerialize(CFrameQ)), 0.40)
 			t2 = Tween(CFrameQ, tonumber(Configs.TweenSpeed) or 350)
 		else
 			if t2 then
 				t2:Cancel()
 				t2 = nil
+                DebugAction("TWEEN_CANCEL", "arrived at quest NPC")
 			end
+            DebugAction("QUEST_NPC_SNAP", "from=" .. DebugSerialize(hrp.Position) .. " to=" .. DebugSerialize(CFrameQ.Position))
 			hrp.CFrame = CFrameQ
+            task.wait()
+            DebugAction("QUEST_NPC_SNAP_RESULT", "actual=" .. DebugSerialize(hrp.Position))
 			EnsureQuestStarted(Quest, NameQuest, LevelQuest)
 		end
 	elseif Quest.Visible then
+        DebugAction("BRANCH_QUEST_ACTIVE", "title=" .. tostring(QuestTitle.Text), 0.50)
 		ResetQuestRequestState()
 		if workspace.Enemies:FindFirstChild(Monster) then
+            DebugAction("TARGET_CONTAINER_FOUND", tostring(Monster), 0.30)
 			for _,v in pairs(workspace.Enemies:GetChildren()) do
 				if v.Name == Monster and v:FindFirstChild("HumanoidRootPart") and v:FindFirstChild("Humanoid") and v.Humanoid.Health > 0 then
-					if string.find(QuestTitle.Text, NameCheckQuest) then
+                    local playerHrp = GetHRP()
+                    local targetDist = playerHrp and (playerHrp.Position - v.HumanoidRootPart.Position).Magnitude or -1
+                    DebugAction("TARGET_FOUND", string.format("%s hp=%.0f dist=%.1f pos=%s", v.Name, v.Humanoid.Health, targetDist, DebugSerialize(v.HumanoidRootPart.Position)), 0.20)
+					if string.find(QuestTitle.Text, NameCheckQuest, 1, true) then
+                        DebugAction("QUEST_MATCH", "title=" .. tostring(QuestTitle.Text) .. " expected=" .. tostring(NameCheckQuest), 0.30)
                         SmartMoveAndAttack(v, QuestTitle, Quest)
 					else
+                        DebugAction("QUEST_MISMATCH", "title=" .. tostring(QuestTitle.Text) .. " expected=" .. tostring(NameCheckQuest))
 						DebugInvoke("AbandonQuest")
 					end
 				end
 			end
 		else
 			title.Text = "Auto Farming Level | Wait For " .. Monster
-			if (CFrameMon.Position - LocalPlayer.Character.HumanoidRootPart.Position).Magnitude > 150 then
+            DebugAction("TARGET_NOT_FOUND", tostring(Monster) .. " | spawn=" .. DebugSerialize(CFrameMon), 0.60)
+            local playerHrp = GetHRP()
+            if not playerHrp then
+                DebugAction("TARGET_WAIT_ABORT", "player HRP missing")
+                return
+            end
+            local spawnDist = (CFrameMon.Position - playerHrp.Position).Magnitude
+			if spawnDist > 150 then
+                DebugAction("MOVE_TO_MOB_SPAWN", string.format("mob=%s dist=%.1f", tostring(Monster), spawnDist), 0.40)
 				t0 = Tween(CFrameMon,350)
-			elseif (CFrameMon.Position - LocalPlayer.Character.HumanoidRootPart.Position).Magnitude <= 150 then
+			else
 				if t0 then
 					t0:Cancel()
+                    DebugAction("TWEEN_CANCEL", "arrived at mob spawn")
 				end
-				LocalPlayer.Character.HumanoidRootPart.CFrame = CFrameMon
+                DebugAction("MOB_SPAWN_SNAP", "to=" .. DebugSerialize(CFrameMon.Position), 0.50)
+				playerHrp.CFrame = CFrameMon
 			end
 		end
 	end
@@ -2717,6 +3090,7 @@ local function RunMainCycle()
     end
 
     if not Configs.AutoFarmLevel then
+        DebugAction("AUTO_FARM_DISABLED", "main cycle idle", 1.0)
         if not Configs.AutoMelee and not Configs.AutoFruitPickup and not Configs.AutoStoreFruit then
             title.Text = "Idling"
             subtitle.Text = "Ative uma automação no menu"
@@ -2724,6 +3098,7 @@ local function RunMainCycle()
         return
     end
 
+    DebugAction("AUTO_FARM_CYCLE", "level=" .. tostring(LocalPlayer.Data.Level.Value), 0.50)
     CheckQuest()
 
     local mainGui = LocalPlayer.PlayerGui:FindFirstChild("Main")
@@ -2732,6 +3107,7 @@ local function RunMainCycle()
     local questTitleContainer = container and container:FindFirstChild("QuestTitle")
     local QuestTitle = questTitleContainer and questTitleContainer:FindFirstChild("Title")
     if not Quest or not QuestTitle then
+        DebugAction("QUEST_GUI_NOT_READY", "Quest=" .. tostring(Quest ~= nil) .. " Title=" .. tostring(QuestTitle ~= nil), 0.50)
         return
     end
 
